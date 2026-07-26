@@ -10,7 +10,7 @@ run_name: mbart_v1.0
 # ──────────────────────────────────────────────
 model: facebook/mbart-large-50-many-to-many-mmt
 torch_dtype: bfloat16
-src_lang: kea_Latn
+src_lang: kea_SV_XX
 tgt_lang: pt_XX
 
 # ──────────────────────────────────────────────

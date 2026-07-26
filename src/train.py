@@ -40,13 +40,18 @@ class TrainingTranslationScript:
         self.dataset = load_dataset(self.config["dataset"])
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.config["model"])
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(self.config["model"])
+
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(
+            self.config["model"]
+        )
+
+        if self.config.get("gradient_checkpointing", True):
+            self.model.config.use_cache = False
 
         self.max_length = self.config["max_length"]
         self.src_lang = self.config["src_lang"]
         self.tgt_lang = self.config["tgt_lang"]
         self.metric = evaluate.load("sacrebleu")
-
 
 
     def _fn_add_special_tokens(self):
@@ -56,7 +61,6 @@ class TrainingTranslationScript:
         :param model:
         :return:
         """
-        #TODO: Ter special tokens para variantes distintas
         special_tokens = {
             "additional_special_tokens": [self.src_lang]
         }
@@ -90,11 +94,11 @@ class TrainingTranslationScript:
 
 
     def test_additional_special_tokens(self):
-        print("Special token id added: ", self.tokenizer.lang_code_to_id["kea_Latn"])
-
-        self.tokenizer.src_lang = "kea_Latn"
-
-        print("Inpud ids: ", self.tokenizer("N ta bai kasa"))
+        logging.info(
+            f"Special token id added: {self.tokenizer.lang_code_to_id[self.src_lang]}"
+        )
+        self.tokenizer.src_lang = self.src_lang
+        logging.info(self.tokenizer("N ta bai kasa"))
 
     def preprocess_function(self, examples):
         """
@@ -181,7 +185,8 @@ class TrainingTranslationScript:
             "generation_max_length": self.max_length,
             "generation_num_beams": self.config.get("generation_num_beams", 5),
             "load_best_model_at_end": True,
-            "metric_for_best_model": "blue",
+            "metric_for_best_model": "bleu",
+            "greater_is_better": True,
             "max_grad_norm": 1.0,
             "logging_nan_inf_filter": True,
             "fp16": self.config.get("fp16", False),
@@ -209,10 +214,10 @@ class TrainingTranslationScript:
         logging.info("Saving model locally...")
         trainer.save_model(output_dir)
         self.tokenizer.save_pretrained(output_dir)
-
+        wandb.finish()
 
 if __name__ == "__main__":
-    path = "config.yaml"
+    path = "configs/config.yaml"
     trainer_Script = TrainingTranslationScript(config_path=path)
     trainer_Script._fn_add_special_tokens()
     trainer_Script.test_additional_special_tokens()
