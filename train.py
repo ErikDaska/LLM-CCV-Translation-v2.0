@@ -12,24 +12,40 @@ from transformers import (
     AutoModelForSeq2SeqLM
     )
 from dotenv import load_dotenv
-
+import yaml
+import torch
+import logging
 
 load_dotenv()
 
-class TrainingTranslationScript:
-    def __init__(self,
-                 model_id="facebook/mbart-large-50-many-to-many-mmt",
-                 dataset_id="Iscte-Sintra/Korpora_paralela_sv"):
-        self.model_id = model_id
-        self.dataset = load_dataset(dataset_id)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
+logging.basicConfig(level=logging.INFO)
 
-        self.max_length = 128
-        self.metric = evaluate.load("sacrebleu")
+class TrainingTranslationScript:
+    def __init__(self, config_path: str):
+
+        print(torch.cuda.is_available())
         wandb.login(key=os.environ["WANDB_API_KEY"])
-        self.src_lang = "kea_Latn"
-        self.tgt_lang = "pt_XX"
+
+        logging.info(f'Config YAML file parsing from {config_path}')
+        with open(config_path, "r") as file:
+            self.config = yaml.safe_load(file)
+
+        self.token = os.getenv("HF_TOKEN")
+        if not self.token:
+            raise EnvironmentError("HF_TOKEN is not set. Add it to your .env file or environment.")
+
+        # Dataset Loading
+        logging.info(f'Dataset Loading {self.config["dataset"]}')
+        self.dataset = load_dataset(self.config["dataset"])
+
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config["model"])
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(self.config["model"])
+
+        self.max_length = self.config["max_length"]
+        self.src_lang = self.config["src_lang"]
+        self.tgt_lang = self.config["tgt_lang"]
+        self.metric = evaluate.load("sacrebleu")
+
 
 
     def _fn_add_special_tokens(self):
@@ -164,9 +180,9 @@ class TrainingTranslationScript:
         self.tokenizer.save_pretrained("mbart-kea")
 
 
-
 if __name__ == "__main__":
-    trainer_Script = TrainingTranslationScript()
+    path = "config.yaml"
+    trainer_Script = TrainingTranslationScript(config_path=path)
     trainer_Script._fn_add_special_tokens()
     trainer_Script.test_additional_special_tokens()
     trainer_Script.run()
