@@ -54,45 +54,40 @@ class TrainingTranslationScript:
         self.metric = evaluate.load("sacrebleu")
 
 
-    def _fn_add_special_tokens(self):
-        """
-        Void fn
-        :param tokenizer:
-        :param model:
-        :return:
-        """
+    def _fn_add_special_tokens(self, save_dir: str = None):
         special_tokens = {
             "additional_special_tokens": [self.src_lang]
         }
 
-        self.tokenizer.add_special_tokens(special_tokens)
-        self.model.resize_token_embeddings(len(self.tokenizer))
+        num_added = self.tokenizer.add_special_tokens(special_tokens)
+        if num_added > 0:
+            self.model.resize_token_embeddings(len(self.tokenizer))
 
         kea_id = self.tokenizer.convert_tokens_to_ids(self.src_lang)
 
-        # Register as a valid language token
-        self.tokenizer.lang_code_to_id[self.src_lang] = kea_id
-        self.tokenizer.id_to_lang_code[kea_id] = self.src_lang
+        if hasattr(self.tokenizer, "lang_code_to_id"):
+            self.tokenizer.lang_code_to_id.setdefault(self.src_lang, kea_id)
+        if hasattr(self.tokenizer, "id_to_lang_code"):
+            self.tokenizer.id_to_lang_code.setdefault(kea_id, self.src_lang)
 
         if hasattr(self.tokenizer, "fairseq_tokens_to_ids") and hasattr(self.tokenizer, "fairseq_ids_to_tokens"):
-            self.tokenizer.fairseq_tokens_to_ids[self.src_lang] = kea_id
-            self.tokenizer.fairseq_ids_to_tokens[kea_id] = self.src_lang
-
-        # --------------------------------------------------------
-        # Initialize the new language embedding using Portuguese
-        # --------------------------------------------------------
+            self.tokenizer.fairseq_tokens_to_ids.setdefault(self.src_lang, kea_id)
+            self.tokenizer.fairseq_ids_to_tokens.setdefault(kea_id, self.src_lang)
 
         pt_id = self.tokenizer.lang_code_to_id[self.tgt_lang]
 
         embedding = self.model.model.shared.weight.data[pt_id].clone()
-
         self.model.model.shared.weight.data[kea_id] = embedding
 
-        # Explicitly configure generation
         self.model.generation_config.decoder_start_token_id = pt_id
         self.model.generation_config.forced_bos_token_id = pt_id
         self.model.generation_config.max_length = self.max_length
         self.model.generation_config.num_beams = 5
+
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+            self.tokenizer.save_pretrained(save_dir)
+            self.model.generation_config.save_pretrained(save_dir)
 
     def test_additional_special_tokens(self):
         logging.info(
@@ -231,6 +226,6 @@ class TrainingTranslationScript:
 if __name__ == "__main__":
     path = "configs/config.yaml"
     trainer_Script = TrainingTranslationScript(config_path=path)
-    trainer_Script._fn_add_special_tokens()
+    trainer_Script._fn_add_special_tokens(save_dir="tokenizer_cache")
     trainer_Script.test_additional_special_tokens()
     trainer_Script.run()
