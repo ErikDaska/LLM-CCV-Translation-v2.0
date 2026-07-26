@@ -185,8 +185,8 @@ class TrainingTranslationScript:
             "generation_max_length": self.max_length,
             "generation_num_beams": self.config.get("generation_num_beams", 5),
             "load_best_model_at_end": True,
-            "metric_for_best_model": "bleu",
-            "greater_is_better": True,
+            "metric_for_best_model": self.config.get("metric_for_best_model", "bleu"),
+            "greater_is_better": self.config.get("greater_is_better", True),
             "max_grad_norm": 1.0,
             "logging_nan_inf_filter": True,
             "fp16": self.config.get("fp16", False),
@@ -214,7 +214,7 @@ class TrainingTranslationScript:
         logging.info("Saving model locally...")
         trainer.save_model(output_dir)
         self.tokenizer.save_pretrained(output_dir)
-        wandb.finish()
+        run.finish()
 
 if __name__ == "__main__":
     path = "configs/config.yaml"
