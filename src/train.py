@@ -118,7 +118,7 @@ class TrainingTranslationScript:
 
         return model_inputs
 
-
+    # TODO: CHECK THIS METRIC (BLEU) AND ADD MORE
     def compute_metrics(self, eval_preds):
         preds, labels = eval_preds
         # In case the model returns more than the prediction logits
