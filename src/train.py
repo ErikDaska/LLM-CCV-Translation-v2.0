@@ -215,6 +215,17 @@ class TrainingTranslationScript:
         logging.info("Saving model locally...")
         trainer.save_model(output_dir)
         self.tokenizer.save_pretrained(output_dir)
+
+        if self.config.get("push_to_hub", False):
+            hub_repo_id = self.config.get("hub_repo_id", "")
+            if not hub_repo_id:
+                raise ValueError("push_to_hub is enabled but hub_repo_id is not set in config.yaml")
+            hub_private = self.config.get("hub_private", True)
+            logging.info(f"Pushing model to HuggingFace Hub: {hub_repo_id}")
+            self.model.push_to_hub(hub_repo_id, token=self.token, private=hub_private)
+            self.tokenizer.push_to_hub(hub_repo_id, token=self.token, private=hub_private)
+            logging.info("Model pushed to Hub successfully.")
+
         run.finish()
 
 if __name__ == "__main__":

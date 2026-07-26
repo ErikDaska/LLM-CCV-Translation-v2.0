@@ -46,3 +46,10 @@ generation_num_beams: 5
 # Attention when changing this parameters the logic may invert
 metric_for_best_model: eval_bleu
 greater_is_better: True
+
+# ──────────────────────────────────────────────
+# Push to Hub
+# ──────────────────────────────────────────────
+push_to_hub: true
+hub_repo_id: "Iscte-Sintra/teste01-sv"
+hub_private: true
