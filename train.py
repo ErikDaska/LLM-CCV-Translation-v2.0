@@ -200,8 +200,9 @@ class TrainingTranslationScript:
 
         trainer.train()
 
-        trainer.save_model("mbart-kea")
-        self.tokenizer.save_pretrained("mbart-kea")
+        logging.info("Saving model locally...")
+        trainer.save_model(output_dir)
+        self.tokenizer.save_pretrained(output_dir)
 
 
 if __name__ == "__main__":
