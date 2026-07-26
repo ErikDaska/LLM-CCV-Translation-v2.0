@@ -2,6 +2,7 @@ import evaluate
 import numpy as np
 import os
 import wandb
+import tempfile
 
 from datasets import load_dataset
 from transformers import (
@@ -142,27 +143,50 @@ class TrainingTranslationScript:
         print(tokenized_datasets)
         data_collator = DataCollatorForSeq2Seq(self.tokenizer, model=self.model)
 
-        args = Seq2SeqTrainingArguments(
-            output_dir="test",
-            eval_strategy="steps",
-            save_strategy="steps",
-            learning_rate=2e-5,
-            per_device_train_batch_size=2,
-            per_device_eval_batch_size=2,
-            weight_decay=0.01,
-            save_total_limit=3,
-            num_train_epochs=1,
-            predict_with_generate=True,
-            fp16=True,
-            logging_strategy="steps",
-            logging_steps=100,
-            report_to="wandb",
-            warmup_steps=500,
-            load_best_model_at_end=True,
-            metric_for_best_model = "bleu",
-            greater_is_better = True,
-            push_to_hub=True,
+        logging.info("Initializing W&B...")
+        model_name_clean = self.config["model"].split("/")[-1]
+        run_name = self.config.get("run_name", f"cpt_{model_name_clean}")
+        group_name = self.config.get("group_name", None)
+        run = wandb.init(
+            dir=tempfile.gettempdir(),
+            project=self.config.get("project", "llm-ccv"),
+            group=group_name,
+            job_type="training",
+            name=run_name,
+            config={**self.config},
         )
+
+
+        output_dir = os.path.join("models_outputs", run_name)
+        os.makedirs(output_dir, exist_ok=True)
+
+        logging.info("Setting training arguments...")
+        training_kwargs = {
+            "output_dir": output_dir,
+            "run_name": run_name,
+            "num_train_epochs": self.config.get("num_train_epochs", 3),
+            "per_device_train_batch_size": self.config.get("per_device_train_batch_size", 4),
+            "per_device_eval_batch_size": self.config.get("per_device_eval_batch_size", 4),
+            "learning_rate": self.config.get("learning_rate", 2e-5),
+            "warmup_steps": self.config.get("warmup_steps", 100),
+            "weight_decay": self.config.get("weight_decay", 0.01),
+            "logging_steps": self.config.get("logging_steps", 10),
+            "eval_strategy": self.config.get("eval_strategy", "steps"),
+            "eval_steps": self.config.get("eval_steps", 500),
+            "save_strategy": self.config.get("save_strategy", "steps"),
+            "save_steps": self.config.get("save_steps", 500),
+            "save_total_limit": self.config.get("save_total_limit", 3),
+            "load_best_model_at_end": True,
+            "metric_for_best_model": "eval_loss",
+            "max_grad_norm": 1.0,
+            "logging_nan_inf_filter": True,
+            "fp16": self.config.get("fp16", False),
+            "bf16": self.config.get("bf16", True),
+            "gradient_checkpointing": self.config.get("gradient_checkpointing", True),
+            "report_to": "wandb",
+        }
+
+        args = Seq2SeqTrainingArguments(training_kwargs)
 
         trainer = Seq2SeqTrainer(
             self.model,
