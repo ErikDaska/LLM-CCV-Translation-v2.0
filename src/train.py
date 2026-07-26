@@ -89,9 +89,10 @@ class TrainingTranslationScript:
         self.model.model.shared.weight.data[kea_id] = embedding
 
         # Explicitly configure generation
-        self.model.config.decoder_start_token_id = pt_id
-        self.model.config.forced_bos_token_id = pt_id
-
+        self.model.generation_config.decoder_start_token_id = pt_id
+        self.model.generation_config.forced_bos_token_id = pt_id
+        self.model.generation_config.max_length = self.max_length
+        self.model.generation_config.num_beams = 5
 
     def test_additional_special_tokens(self):
         logging.info(
@@ -185,7 +186,7 @@ class TrainingTranslationScript:
             "generation_max_length": self.max_length,
             "generation_num_beams": self.config.get("generation_num_beams", 5),
             "load_best_model_at_end": True,
-            "metric_for_best_model": self.config.get("metric_for_best_model", "bleu"),
+            "metric_for_best_model": self.config.get("metric_for_best_model", "eval_bleu"),
             "greater_is_better": self.config.get("greater_is_better", True),
             "max_grad_norm": 1.0,
             "logging_nan_inf_filter": True,

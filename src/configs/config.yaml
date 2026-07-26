@@ -1,8 +1,8 @@
 # ──────────────────────────────────────────────
 # W&B
 # ──────────────────────────────────────────────
-project: Translation Models SV
-group_name: mbart
+project: Translation Models
+group_name: mbart_SV
 run_name: mbart_v1.0
 
 # ──────────────────────────────────────────────
@@ -10,7 +10,7 @@ run_name: mbart_v1.0
 # ──────────────────────────────────────────────
 model: facebook/mbart-large-50-many-to-many-mmt
 torch_dtype: bfloat16
-src_lang: kea_SV_XX
+src_lang: kea_sv_XX
 tgt_lang: pt_XX
 
 # ──────────────────────────────────────────────
@@ -35,7 +35,7 @@ logging_steps: 10
 eval_strategy: steps
 eval_steps: 500
 save_strategy: steps
-save_steps: 500f
+save_steps: 500
 save_total_limit: 3
 fp16: false
 bf16: true
@@ -44,5 +44,5 @@ early_stopping_patience: 3
 generation_num_beams: 5
 
 # Attention when changing this parameters the logic may invert
-metric_for_best_model: blue
+metric_for_best_model: eval_bleu
 greater_is_better: True
