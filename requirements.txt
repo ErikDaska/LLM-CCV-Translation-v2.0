@@ -1,0 +1,10 @@
+datasets==5.0.0
+transformers==5.14.1
+tiktoken==0.13.0
+sentencepiece==0.2.2
+protobuf>=4.21.0
+sacrebleu==2.6.0
+evaluate==0.4.6
+accelerate==1.14.0
+wandb==0.28.1
+python-dotenv==1.2.2
