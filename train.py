@@ -58,33 +58,34 @@ class TrainingTranslationScript:
         """
         #TODO: Ter special tokens para variantes distintas
         special_tokens = {
-            "additional_special_tokens": ["kea_Latn"]
+            "additional_special_tokens": [self.src_lang]
         }
 
         self.tokenizer.add_special_tokens(special_tokens)
         self.model.resize_token_embeddings(len(self.tokenizer))
 
-        kea_id = self.tokenizer.convert_tokens_to_ids("kea_Latn")
+        kea_id = self.tokenizer.convert_tokens_to_ids(self.src_lang)
 
         # Register as a valid language token
-        self.tokenizer.lang_code_to_id["kea_Latn"] = kea_id
-        self.tokenizer.id_to_lang_code[kea_id] = "kea_Latn"
+        self.tokenizer.lang_code_to_id[self.src_lang] = kea_id
+        self.tokenizer.id_to_lang_code[kea_id] = self.src_lang
 
         if hasattr(self.tokenizer, "fairseq_tokens_to_ids") and hasattr(self.tokenizer, "fairseq_ids_to_tokens"):
-            self.tokenizer.fairseq_tokens_to_ids["kea_Latn"] = kea_id
-            self.tokenizer.fairseq_ids_to_tokens[kea_id] = "kea_Latn"
+            self.tokenizer.fairseq_tokens_to_ids[self.src_lang] = kea_id
+            self.tokenizer.fairseq_ids_to_tokens[kea_id] = self.src_lang
 
         # --------------------------------------------------------
-        # NEW:
         # Initialize the new language embedding using Portuguese
-        # instead of leaving it randomly initialized.
         # --------------------------------------------------------
 
-        pt_id = self.tokenizer.lang_code_to_id["pt_XX"]
-        self.model.model.shared.weight.data[kea_id] = (
-            self.model.model.shared.weight.data[pt_id].clone()
-        )
-        # Generate Portuguese during inference
+        pt_id = self.tokenizer.lang_code_to_id[self.tgt_lang]
+
+        embedding = self.model.model.shared.weight.data[pt_id].clone()
+
+        self.model.model.shared.weight.data[kea_id] = embedding
+
+        # Explicitly configure generation
+        self.model.config.decoder_start_token_id = pt_id
         self.model.config.forced_bos_token_id = pt_id
 
 
@@ -141,7 +142,7 @@ class TrainingTranslationScript:
             remove_columns=self.dataset["train"].column_names,
         )
         print(tokenized_datasets)
-        data_collator = DataCollatorForSeq2Seq(self.tokenizer, model=self.model)
+        data_collator = DataCollatorForSeq2Seq(self.tokenizer, model=self.model, pad_to_multiple_of=8)
 
         logging.info("Initializing W&B...")
         model_name_clean = self.config["model"].split("/")[-1]
@@ -176,8 +177,11 @@ class TrainingTranslationScript:
             "save_strategy": self.config.get("save_strategy", "steps"),
             "save_steps": self.config.get("save_steps", 500),
             "save_total_limit": self.config.get("save_total_limit", 3),
+            "predict_with_generate": True,
+            "generation_max_length": self.max_length,
+            "generation_num_beams": self.config.get("generation_num_beams", 5),
             "load_best_model_at_end": True,
-            "metric_for_best_model": "eval_loss",
+            "metric_for_best_model": "blue",
             "max_grad_norm": 1.0,
             "logging_nan_inf_filter": True,
             "fp16": self.config.get("fp16", False),
@@ -186,7 +190,9 @@ class TrainingTranslationScript:
             "report_to": "wandb",
         }
 
-        args = Seq2SeqTrainingArguments(training_kwargs)
+        args = Seq2SeqTrainingArguments(
+            **training_kwargs
+        )
 
         trainer = Seq2SeqTrainer(
             self.model,
