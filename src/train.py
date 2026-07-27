@@ -53,16 +53,25 @@ class TrainingTranslationScript:
         self.tgt_lang = self.config["tgt_lang"]
         self.metric = evaluate.load("sacrebleu")
 
+    def _fn_add_special_tokens(self):
 
-    def _fn_add_special_tokens(self, save_dir: str = None):
-        special_tokens = {
-            "additional_special_tokens": [self.src_lang]
-        }
+        # Pass replace_extra_special_tokens=False to append without replacing
+        num_added = self.tokenizer.add_special_tokens(
+            {"additional_special_tokens": [self.src_lang]},
+            replace_extra_special_tokens=False
+        )
+        # Always resize model embeddings when vocabulary size grows
+        if num_added > 0:
+            self.model.resize_token_embeddings(len(self.tokenizer))
 
-        self.tokenizer.add_special_tokens({"additional_special_tokens": [[self.src_lang]]})
-        self.model.resize_token_embeddings(len(self.tokenizer))
-        self.tokenizer.lang_code_to_id[self.src_lang] = self.tokenizer.convert_tokens_to_ids(self.src_lang)
+        # Get the assigned token ID
+        token_id = self.tokenizer.convert_tokens_to_ids(self.src_lang)
 
+        # Update internal mapping lookups for mBART
+        if hasattr(self.tokenizer, "lang_code_to_id"):
+            self.tokenizer.lang_code_to_id[self.src_lang] = token_id
+        if hasattr(self.tokenizer, "id_to_lang_code"):
+            self.tokenizer.id_to_lang_code[token_id] = self.src_lang
 
 
     def test_additional_special_tokens(self):
@@ -202,6 +211,6 @@ class TrainingTranslationScript:
 if __name__ == "__main__":
     path = "configs/config.yaml"
     trainer_Script = TrainingTranslationScript(config_path=path)
-    trainer_Script._fn_add_special_tokens(save_dir="tokenizer_cache")
+    trainer_Script._fn_add_special_tokens()
     trainer_Script.test_additional_special_tokens()
     trainer_Script.run()
