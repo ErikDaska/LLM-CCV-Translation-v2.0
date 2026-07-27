@@ -11,7 +11,7 @@ from transformers import (
     Seq2SeqTrainer,
     AutoTokenizer,
     AutoModelForSeq2SeqLM
-    )
+)
 from dotenv import load_dotenv
 import yaml
 import torch
@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO)
 class TrainingTranslationScript:
     def __init__(self, config_path: str):
 
-        print(torch.cuda.is_available())
+        print("CUDA Available:", torch.cuda.is_available())
         wandb.login(key=os.environ["WANDB_API_KEY"])
 
         logging.info(f'Config YAML file parsing from {config_path}')
@@ -39,10 +39,16 @@ class TrainingTranslationScript:
         logging.info(f'Dataset Loading {self.config["dataset"]}')
         self.dataset = load_dataset(self.config["dataset"])
 
-        self.tokenizer = AutoTokenizer.from_pretrained(self.config["model"])
+
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.config["model"],
+            token=self.token,
+            src_lang="en_XX"
+        )
 
         self.model = AutoModelForSeq2SeqLM.from_pretrained(
-            self.config["model"]
+            self.config["model"],
+            token=self.token
         )
 
         if self.config.get("gradient_checkpointing", True):
@@ -53,13 +59,16 @@ class TrainingTranslationScript:
         self.tgt_lang = self.config["tgt_lang"]
         self.metric = evaluate.load("sacrebleu")
 
-    def _fn_add_special_tokens(self):
+        self._fn_add_special_tokens()
 
+
+    def _fn_add_special_tokens(self):
         # Pass replace_extra_special_tokens=False to append without replacing
         num_added = self.tokenizer.add_special_tokens(
             {"additional_special_tokens": [self.src_lang]},
             replace_extra_special_tokens=False
         )
+
         # Always resize model embeddings when vocabulary size grows
         if num_added > 0:
             self.model.resize_token_embeddings(len(self.tokenizer))
@@ -98,10 +107,8 @@ class TrainingTranslationScript:
 
         return model_inputs
 
-    # TODO: CHECK THIS METRIC (BLEU) AND ADD MORE
     def compute_metrics(self, eval_preds):
         preds, labels = eval_preds
-        # In case the model returns more than the prediction logits
         if isinstance(preds, tuple):
             preds = preds[0]
 
@@ -111,7 +118,6 @@ class TrainingTranslationScript:
         labels = np.where(labels != -100, labels, self.tokenizer.pad_token_id)
         decoded_labels = self.tokenizer.batch_decode(labels, skip_special_tokens=True)
 
-        # Some simple post-processing
         decoded_preds = [pred.strip() for pred in decoded_preds]
         decoded_labels = [[label.strip()] for label in decoded_labels]
 
@@ -142,9 +148,10 @@ class TrainingTranslationScript:
             config={**self.config},
         )
 
-
         output_dir = os.path.join("models_outputs", run_name)
         os.makedirs(output_dir, exist_ok=True)
+
+
 
         logging.info("Setting training arguments...")
         training_kwargs = {
@@ -176,9 +183,7 @@ class TrainingTranslationScript:
             "report_to": "wandb",
         }
 
-        args = Seq2SeqTrainingArguments(
-            **training_kwargs
-        )
+        args = Seq2SeqTrainingArguments(**training_kwargs)
 
         trainer = Seq2SeqTrainer(
             self.model,
@@ -191,6 +196,9 @@ class TrainingTranslationScript:
         )
 
         trainer.train()
+
+        # Standardize src_lang in tokenizer config before saving to avoid future KeyError on reload
+        self.tokenizer.src_lang = "en_XX"
 
         logging.info("Saving model locally...")
         trainer.save_model(output_dir)
@@ -211,6 +219,5 @@ class TrainingTranslationScript:
 if __name__ == "__main__":
     path = "configs/config.yaml"
     trainer_Script = TrainingTranslationScript(config_path=path)
-    trainer_Script._fn_add_special_tokens()
     trainer_Script.test_additional_special_tokens()
     trainer_Script.run()
