@@ -156,14 +156,19 @@ class TrainingTranslationScript:
         model_name_clean = self.config["model"].split("/")[-1]
         run_name = self.config.get("run_name", f"cpt_{model_name_clean}")
 
-        run = wandb.init(
-            dir=os.environ["TMPDIR"],
-            project=self.config.get("project", "llm-ccv"),
-            group=self.config.get("group_name", None),
-            job_type="training",
-            name=run_name,
-            config={**self.config},
-        )
+        is_hp_search = self.config.get("hyperparameter_search", False)
+
+        if not is_hp_search:
+            run = wandb.init(
+                dir=os.environ["TMPDIR"],
+                project=self.config.get("project", "llm-ccv"),
+                group=self.config.get("group_name", None),
+                job_type="training",
+                name=run_name,
+                config={**self.config},
+            )
+        else:
+            run = None
 
         output_dir = os.path.join(self.output_base_dir, run_name)
         os.makedirs(output_dir, exist_ok=True)
@@ -232,7 +237,6 @@ class TrainingTranslationScript:
 
             n_trials = self.config.get("hp_n_trials", 20)
             logging.info(f"Starting hyperparameter search with {n_trials} trials...")
-            run.finish()
 
             best = trainer.hyperparameter_search(
                 direction="maximize",
@@ -265,7 +269,8 @@ class TrainingTranslationScript:
             self.model.push_to_hub(hub_repo_id, token=self.token, private=hub_private)
             self.tokenizer.push_to_hub(hub_repo_id, token=self.token, private=hub_private)
 
-        run.finish()
+        if run is not None:
+            run.finish()
 
 
 if __name__ == "__main__":
