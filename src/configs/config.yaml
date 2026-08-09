@@ -49,12 +49,6 @@ generation_num_beams: 5
 metric_for_best_model: eval_SacreBleu
 greater_is_better: True
 
-# ──────────────────────────────────────────────
-# Hyperparameter Search (Optuna)
-# ──────────────────────────────────────────────
-hyperparameter_search: false
-hp_n_trials: 20
-# hp_storage: "sqlite:///optuna.db"  # Uncomment to persist search across runs
 
 # ──────────────────────────────────────────────
 # Push to Hub
