@@ -8,6 +8,7 @@ os.environ["TMPDIR"] = "/home/criolo/storage/tmp"
 for path in [os.environ["HF_HOME"], os.environ["WANDB_DIR"], os.environ["TMPDIR"]]:
     os.makedirs(path, exist_ok=True)
 
+from utils.wb_utils import HPOWandbCallback
 import logging
 import yaml
 import evaluate
@@ -27,7 +28,6 @@ from transformers import (
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
-
 
 class TrainingTranslationScript:
     def __init__(self, config_path: str):
@@ -65,7 +65,7 @@ class TrainingTranslationScript:
 
         # Metrics
         self.sacrebleu = evaluate.load("sacrebleu")
-        self.chrF = evaluate.load("chrf")
+        self.chrf = evaluate.load("chrf")
         self.meteor = evaluate.load("meteor")
         self.ter = evaluate.load("ter")
 
@@ -118,45 +118,80 @@ class TrainingTranslationScript:
         decoded_labels = [[label.strip()] for label in decoded_labels]
 
         sacrebleu_result = self.sacrebleu.compute(predictions=decoded_preds, references=decoded_labels)
-        chrF_result = self.chrF.compute(predictions=decoded_preds, references=decoded_labels)
+        chrf_result = self.chrf.compute(predictions=decoded_preds, references=decoded_labels)
         meteor_results = self.meteor.compute(predictions=decoded_preds, references=decoded_labels)
         ter_result = self.ter.compute(predictions=decoded_preds, references=decoded_labels)
 
         return {
             "SacreBleu": sacrebleu_result["score"],
-            "chrF": chrF_result["score"],
+            "chrf": chrf_result["score"],
             "meteor": meteor_results["meteor"],
             "ter": ter_result["score"],
         }
 
-    def run(self):
-        tokenized_datasets = self.dataset.map(
-            self.preprocess_function,
-            batched=True,
-            remove_columns=self.dataset["train"].column_names,
+    def model_init(self):
+        tokenizer = AutoTokenizer.from_pretrained(
+            self.config["model"],
+            token=self.token,
+            src_lang="en_XX",
         )
 
-        data_collator = DataCollatorForSeq2Seq(
-            self.tokenizer, model=self.model, pad_to_multiple_of=8
+        model = AutoModelForSeq2SeqLM.from_pretrained(
+            self.config["model"],
+            token=self.token,
+        )
+        num_added = tokenizer.add_special_tokens(
+            {"additional_special_tokens": [self.src_lang]},
+            replace_extra_special_tokens=False,
         )
 
+        if num_added > 0:
+            model.resize_token_embeddings(len(tokenizer))
+
+        token_id = tokenizer.convert_tokens_to_ids(self.src_lang)
+
+        if hasattr(tokenizer, "lang_code_to_id"):
+            tokenizer.lang_code_to_id[self.src_lang] = token_id
+        if hasattr(tokenizer, "id_to_lang_code"):
+            tokenizer.id_to_lang_code[token_id] = self.src_lang
+        return model
+
+    def _hp_space(self, trial):
+        return {
+            "learning_rate": trial.suggest_float(
+                "learning_rate",
+                1e-5,
+                5e-5,
+                log=True,
+            ),
+            "per_device_train_batch_size": trial.suggest_categorical(
+                "per_device_train_batch_size",
+                [16, 32],
+            ),
+            "num_train_epochs": trial.suggest_int(
+                "num_train_epochs",
+                2,
+                4,
+            ),
+        }
+
+    def _hp_name(self, trial):
+        group_name = self.config.get("group_name", "hpo")
+        return f"{group_name}_trial_{trial.number:02d}"
+
+    def manual_training(self, tokenized_datasets, data_collator):
         logging.info("Initializing W&B...")
         model_name_clean = self.config["model"].split("/")[-1]
         run_name = self.config.get("run_name", f"cpt_{model_name_clean}")
 
-        is_hp_search = self.config.get("hyperparameter_search", False)
-
-        if not is_hp_search:
-            run = wandb.init(
-                dir=os.environ["TMPDIR"],
-                project=self.config.get("project", "llm-ccv"),
-                group=self.config.get("group_name", None),
-                job_type="training",
-                name=run_name,
-                config={**self.config},
-            )
-        else:
-            run = None
+        run = wandb.init(
+            dir=os.environ["TMPDIR"],
+            project=self.config.get("project", "llm-ccv"),
+            group=self.config.get("group_name", None),
+            job_type="training",
+            name=run_name,
+            config={**self.config},
+        )
 
         output_dir = os.path.join(self.output_base_dir, run_name)
         os.makedirs(output_dir, exist_ok=True)
@@ -230,7 +265,106 @@ class TrainingTranslationScript:
         if run is not None:
             run.finish()
 
+    def hpo_training(self, tokenized_datasets, data_collator):
+
+        project_name = self.config.get(
+            "project",
+            "Translation Models",
+        )
+
+        group_name = self.config.get(
+            "group_name",
+            "hpo_experiment",
+        )
+
+        hpo_output_dir = os.path.join(
+            self.output_base_dir,
+            "hpo_trials",
+        )
+
+        training_args = Seq2SeqTrainingArguments(
+            output_dir=hpo_output_dir,
+
+            report_to=["wandb"],
+
+            eval_strategy="epoch",
+            predict_with_generate=True,
+
+            generation_max_length=self.max_length,
+            generation_num_beams=self.config.get(
+                "generation_num_beams",
+                5,
+            ),
+
+            logging_strategy="steps",
+            logging_steps=self.config.get(
+                "logging_steps",
+                10,
+            ),
+
+            save_strategy="no",
+
+            metric_for_best_model="eval_chrf",
+            greater_is_better=True,
+
+            bf16=self.config.get("bf16", True),
+            fp16=self.config.get("fp16", False),
+
+            gradient_checkpointing=self.config.get(
+                "gradient_checkpointing",
+                True,
+            ),
+        )
+
+        trainer = Seq2SeqTrainer(
+            model_init=self.model_init,
+            args=training_args,
+
+            train_dataset=tokenized_datasets["train"],
+            eval_dataset=tokenized_datasets["validation"],
+
+            data_collator=data_collator,
+            processing_class=self.tokenizer,
+            compute_metrics=self.compute_metrics,
+
+            callbacks=[
+                HPOWandbCallback(
+                    project_name=project_name,
+                    group_name=group_name,
+                )
+            ],
+        )
+
+        best_run = trainer.hyperparameter_search(
+            direction="maximize",
+            hp_space=self._hp_space,
+            hp_name=self._hp_name,
+            n_trials=self.config.get("hpo_trials", 10),
+            backend="optuna",
+        )
+
+        logging.info("Best HPO run: %s", best_run)
+
+        return best_run
+
+
+    def run(self):
+        tokenized_datasets = self.dataset.map(
+            self.preprocess_function,
+            batched=True,
+            remove_columns=self.dataset["train"].column_names,
+        )
+
+        data_collator = DataCollatorForSeq2Seq(
+            self.tokenizer, model=self.model, pad_to_multiple_of=8
+        )
+        if self.config.get("hyperparameter_search"):
+            self.hpo_training(tokenized_datasets, data_collator)
+        else:
+            (self.manual_training(tokenized_datasets, data_collator))
+
 
 if __name__ == "__main__":
-    script = TrainingTranslationScript(config_path="configs/config.yaml")
+    #script = TrainingTranslationScript(config_path="configs/config.yaml")
+    script = TrainingTranslationScript(config_path="configs/config_hpo.yaml")
     script.run()
