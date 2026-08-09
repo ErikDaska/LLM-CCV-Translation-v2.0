@@ -80,6 +80,16 @@ class TrainingTranslationScript:
 
         self._fn_add_special_tokens()
 
+    def _model_init(self):
+        model = AutoModelForSeq2SeqLM.from_pretrained(
+            self.config["model"],
+            token=self.token,
+        )
+        model.resize_token_embeddings(len(self.tokenizer))
+        if self.config.get("gradient_checkpointing", True):
+            model.config.use_cache = False
+        return model
+
     def _fn_add_special_tokens(self):
         num_added = self.tokenizer.add_special_tokens(
             {"additional_special_tokens": [self.src_lang]},
@@ -195,7 +205,8 @@ class TrainingTranslationScript:
             callbacks.append(EarlyStoppingCallback(early_stopping_patience=patience))
 
         trainer = Seq2SeqTrainer(
-            model=self.model,
+            model=self.model if not self.config.get("hyperparameter_search", False) else None,
+            model_init=self._model_init if self.config.get("hyperparameter_search", False) else None,
             args=args,
             train_dataset=tokenized_datasets["train"],
             eval_dataset=tokenized_datasets["validation"],
