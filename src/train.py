@@ -1,4 +1,6 @@
 import evaluate
+from sacrebleu.metrics import TER
+
 import numpy as np
 import os
 import wandb
@@ -16,6 +18,7 @@ from dotenv import load_dotenv
 import yaml
 import torch
 import logging
+
 
 load_dotenv()
 
@@ -57,8 +60,14 @@ class TrainingTranslationScript:
         self.max_length = self.config["max_length"]
         self.src_lang = self.config["src_lang"]
         self.tgt_lang = self.config["tgt_lang"]
-        self.metric = evaluate.load("sacrebleu")
 
+        # Load of N-Gram or string based metrics
+        self.sacrebleu = evaluate.load("sacrebleu")
+        self.chrF = evaluate.load("chrF")
+        self.meteor = evaluate.load("chrF")
+        self.ter = TER()
+
+        # Add special tokens
         self._fn_add_special_tokens()
 
 
@@ -121,8 +130,17 @@ class TrainingTranslationScript:
         decoded_preds = [pred.strip() for pred in decoded_preds]
         decoded_labels = [[label.strip()] for label in decoded_labels]
 
-        result = self.metric.compute(predictions=decoded_preds, references=decoded_labels)
-        return {"bleu": result["score"]}
+        sacrebleu_result = self.sacrebleu.compute(predictions=decoded_preds, references=decoded_labels)
+        chrF_result = self.chrF.compute(predictions=decoded_preds, references=decoded_labels)
+        meteor_results = self.meteor.compute(predictions=decoded_preds,references=decoded_labels)
+        ter_result = self.ter.corpus_score(decoded_preds,[decoded_labels] )
+
+        return {
+            "SacreBleu": sacrebleu_result["score"],
+            "chrF": chrF_result["score"],
+            "meteor": meteor_results["meteor"],
+            "ter": ter_result.score,
+                }
 
 
     def run(self):
