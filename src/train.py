@@ -63,8 +63,8 @@ class TrainingTranslationScript:
 
         # Load of N-Gram or string based metrics
         self.sacrebleu = evaluate.load("sacrebleu")
-        self.chrF = evaluate.load("chrF")
-        self.meteor = evaluate.load("chrF")
+        self.chrF = evaluate.load("chrf")
+        self.meteor = evaluate.load("meteor")
         self.ter = TER()
 
         # Add special tokens
