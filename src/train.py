@@ -29,6 +29,7 @@ from transformers import (
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
+
 class TrainingTranslationScript:
     def __init__(self, config_path: str):
         print("CUDA Available:", torch.cuda.is_available())
@@ -76,23 +77,24 @@ class TrainingTranslationScript:
         )
         self.output_base_dir = os.path.abspath(raw_output_dir)
 
-        self._fn_add_special_tokens()
+        self.model, self.tokenizer = self._fn_add_special_tokens(self.model, self.tokenizer)
 
-    def _fn_add_special_tokens(self):
-        num_added = self.tokenizer.add_special_tokens(
+    def _fn_add_special_tokens(self, model, tokenizer):
+        num_added = tokenizer.add_special_tokens(
             {"additional_special_tokens": [self.src_lang]},
             replace_extra_special_tokens=False,
         )
 
         if num_added > 0:
-            self.model.resize_token_embeddings(len(self.tokenizer))
+            model.resize_token_embeddings(len(tokenizer))
 
-        token_id = self.tokenizer.convert_tokens_to_ids(self.src_lang)
+        token_id = tokenizer.convert_tokens_to_ids(self.src_lang)
 
-        if hasattr(self.tokenizer, "lang_code_to_id"):
-            self.tokenizer.lang_code_to_id[self.src_lang] = token_id
+        if hasattr(tokenizer, "lang_code_to_id"):
+            tokenizer.lang_code_to_id[self.src_lang] = token_id
         if hasattr(self.tokenizer, "id_to_lang_code"):
-            self.tokenizer.id_to_lang_code[token_id] = self.src_lang
+            tokenizer.id_to_lang_code[token_id] = self.src_lang
+        return model, tokenizer
 
     def preprocess_function(self, examples):
         self.tokenizer.src_lang = self.src_lang
@@ -140,20 +142,7 @@ class TrainingTranslationScript:
             self.config["model"],
             token=self.token,
         )
-        num_added = tokenizer.add_special_tokens(
-            {"additional_special_tokens": [self.src_lang]},
-            replace_extra_special_tokens=False,
-        )
-
-        if num_added > 0:
-            model.resize_token_embeddings(len(tokenizer))
-
-        token_id = tokenizer.convert_tokens_to_ids(self.src_lang)
-
-        if hasattr(tokenizer, "lang_code_to_id"):
-            tokenizer.lang_code_to_id[self.src_lang] = token_id
-        if hasattr(tokenizer, "id_to_lang_code"):
-            tokenizer.id_to_lang_code[token_id] = self.src_lang
+        model, tokenizer = self._fn_add_special_tokens(model, tokenizer)
         return model
 
     def _hp_space(self, trial):
@@ -347,7 +336,6 @@ class TrainingTranslationScript:
 
         return best_run
 
-
     def run(self):
         tokenized_datasets = self.dataset.map(
             self.preprocess_function,
@@ -365,6 +353,6 @@ class TrainingTranslationScript:
 
 
 if __name__ == "__main__":
-    #script = TrainingTranslationScript(config_path="configs/config.yaml")
+    # script = TrainingTranslationScript(config_path="configs/config.yaml")
     script = TrainingTranslationScript(config_path="configs/config_hpo.yaml")
     script.run()
