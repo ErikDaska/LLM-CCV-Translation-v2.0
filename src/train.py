@@ -8,6 +8,7 @@ os.environ["TMPDIR"] = "/home/criolo/storage/tmp"
 for path in [os.environ["HF_HOME"], os.environ["WANDB_DIR"], os.environ["TMPDIR"]]:
     os.makedirs(path, exist_ok=True)
 
+import optuna
 import logging
 import tempfile
 import yaml
@@ -204,8 +205,40 @@ class TrainingTranslationScript:
             callbacks=callbacks,
         )
 
+        if self.config.get("hyperparameter_search", False):
+            def hp_space(trial):
+                return {
+                    "learning_rate": trial.suggest_float("learning_rate", 1e-6, 5e-5, log=True),
+                    "per_device_train_batch_size": trial.suggest_categorical("per_device_train_batch_size", [16, 32, 64]),
+                    "warmup_steps": trial.suggest_int("warmup_steps", 0, 500, step=50),
+                    "weight_decay": trial.suggest_float("weight_decay", 0.0, 0.1),
+                }
+
+            def hp_name(trial):
+                lr = trial.params.get("learning_rate", 0)
+                bs = trial.params.get("per_device_train_batch_size", 0)
+                return f"{run_name}_lr{lr:.1e}_bs{bs}_trial{trial.number}"
+
+            n_trials = self.config.get("hp_n_trials", 20)
+            logging.info(f"Starting hyperparameter search with {n_trials} trials...")
+            run.finish()
+
+            best = trainer.hyperparameter_search(
+                direction="maximize",
+                hp_space=hp_space,
+                hp_name=hp_name,
+                n_trials=n_trials,
+                study_name=run_name,
+                storage=self.config.get("hp_storage", None),
+            )
+            logging.info(f"Best trial: {best}")
+            logging.info(f"Best hyperparameters: {best.hyperparameters}")
+            logging.info("Copy these values into config.yaml and re-run without hyperparameter_search.")
+            return
+
         trainer.train()
 
+        # This puts back to the default being en_XX, otherwise when loading the model it will give an error
         self.tokenizer.src_lang = "en_XX"
 
         logging.info("Saving model locally...")
