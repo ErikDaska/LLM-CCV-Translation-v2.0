@@ -2,71 +2,81 @@
 # W&B
 # ──────────────────────────────────────────────
 project: "Translation Models"
-group_name: "mbart_SV_hpo"
+group_name: "m2m100_SV_HPO"
 
 # ──────────────────────────────────────────────
 # Local saving
 # ──────────────────────────────────────────────
-output_base_dir: "/home/criolo/storage/models_outputs/translation_models"
+output_base_dir: "/home/criolo/storage/models_outputs/translation_models/m2m100-sv"
 
 # ──────────────────────────────────────────────
 # Model & Tokenizer
 # ──────────────────────────────────────────────
-model: "Iscte-Sintra/teste01-sv"
+model: "facebook/m2m100_418M"
+
 torch_dtype: "bfloat16"
-src_lang: "kea_st_XX"
-tgt_lang: "pt_XX"
+
+# Custom Cape Verdean Creole language
+src_lang: "kea_sv_XX"
+
+# M2M-100 Portuguese language code
+tgt_lang: "pt"
 
 # ──────────────────────────────────────────────
 # Dataset
 # ──────────────────────────────────────────────
 dataset: "Iscte-Sintra/Korpora_paralela_sv"
-text_column: "text"
-remove_columns:
-  - text
-  - category
-  - language
+
 max_length: 128
 
 # ──────────────────────────────────────────────
 # HPO
 # ──────────────────────────────────────────────
 hyperparameter_search: true
-hpo_trials: 2
-
+hpo_trials: 50
 
 # ──────────────────────────────────────────────
 # Training
 # ──────────────────────────────────────────────
-# These are fixed during HPO.
-# The parameters being optimized are supplied by Optuna.
+# These parameters remain fixed during HPO.
+# Optimized parameters are supplied by Optuna.
+
 per_device_eval_batch_size: 64
+
 warmup_steps: 100
+
 weight_decay: 0.01
+
 logging_steps: 10
+
 # Evaluate after every epoch
 eval_strategy: "epoch"
-# Don't save checkpoints during HPO.
-# Checkpoints can consume a lot of disk space across trials.
+
+# Do not save checkpoints during HPO
 save_strategy: "no"
+
 fp16: false
 bf16: true
+
 gradient_checkpointing: true
+
 early_stopping_patience: 3
+
 generation_num_beams: 5
 
 # ──────────────────────────────────────────────
 # HPO Objective
 # ──────────────────────────────────────────────
-metric_for_best_model: "eval_chrf"
+metric_for_best_model: "eval_loss"
+
 greater_is_better: true
 
 # ──────────────────────────────────────────────
 # Push to Hub
 # ──────────────────────────────────────────────
-
-# Don't push individual HPO trials.
+# Individual HPO trials are NOT pushed.
 push_to_hub: false
-hub_repo_id: "Iscte-Sintra/teste01-sv"
-hub_private: true
 
+hub_repo_id: "Iscte-Sintra/teste01-sv"
+
+hub_private: true
