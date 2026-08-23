@@ -135,32 +135,57 @@ class TrainingTranslationScript:
         tokenizer = AutoTokenizer.from_pretrained(
             self.config["model"],
             token=self.token,
-            src_lang="en_XX",
         )
+
+        tokenizer.src_lang = self.src_lang
+        tokenizer.tgt_lang = self.tgt_lang
 
         model = AutoModelForSeq2SeqLM.from_pretrained(
             self.config["model"],
             token=self.token,
         )
+
         model, tokenizer = self._fn_add_special_tokens(model, tokenizer)
+
         return model
 
     def _hp_space(self, trial):
         return {
             "learning_rate": trial.suggest_float(
                 "learning_rate",
-                1e-5,
+                5e-6,
                 5e-5,
                 log=True,
             ),
+
             "per_device_train_batch_size": trial.suggest_categorical(
                 "per_device_train_batch_size",
-                [16, 32],
+                [8, 16, 32],
             ),
+
             "num_train_epochs": trial.suggest_int(
                 "num_train_epochs",
-                2,
-                4,
+                3,
+                10,
+            ),
+
+            "label_smoothing_factor": trial.suggest_float(
+                "label_smoothing_factor",
+                0.0,
+                0.2,
+            ),
+
+            "warmup_ratio": trial.suggest_float(
+                "warmup_ratio",
+                0.0,
+                0.15,
+            ),
+
+            "weight_decay": trial.suggest_float(
+                "weight_decay",
+                1e-4,
+                0.1,
+                log=True,
             ),
         }
 
@@ -271,6 +296,10 @@ class TrainingTranslationScript:
             "hpo_trials",
         )
 
+        os.environ["WANDB_PROJECT"] = project_name
+        os.environ["WANDB_RUN_GROUP"] = group_name
+        os.environ["WANDB_LOG_MODEL"] = "false"
+
         training_args = Seq2SeqTrainingArguments(
             output_dir=hpo_output_dir,
 
@@ -315,13 +344,6 @@ class TrainingTranslationScript:
             data_collator=data_collator,
             processing_class=self.tokenizer,
             compute_metrics=self.compute_metrics,
-
-            callbacks=[
-                HPOWandbCallback(
-                    project_name=project_name,
-                    group_name=group_name,
-                )
-            ],
         )
 
         best_run = trainer.hyperparameter_search(
@@ -353,6 +375,6 @@ class TrainingTranslationScript:
 
 
 if __name__ == "__main__":
-    # script = TrainingTranslationScript(config_path="configs/config.yaml")
-    script = TrainingTranslationScript(config_path="configs/config_hpo.yaml")
+    script = TrainingTranslationScript(config_path="configs/config.yaml")
+    #script = TrainingTranslationScript(config_path="configs/config_hpo.yaml")
     script.run()

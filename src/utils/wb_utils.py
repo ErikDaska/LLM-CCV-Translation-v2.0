@@ -6,22 +6,23 @@ class HPOWandbCallback(WandbCallback):
         super().__init__()
         self.project_name = project_name
         self.group_name = group_name
+        self._initialized = False
 
     def setup(self, args, state, model, **kwargs):
 
         if self._wandb is None:
             return
 
-        # During hyperparameter search, HF stores the trial name here.
-        run_name = state.trial_name
+        if self._initialized:
+            return
 
-        if run_name is None:
-            run_name = args.run_name
+        run_name = state.trial_name or args.run_name
 
         self._wandb.init(
             project=self.project_name,
             group=self.group_name,
             name=run_name,
             config=args.to_dict(),
-            reinit=True,
         )
+
+        self._initialized = True
