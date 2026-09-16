@@ -8,7 +8,6 @@ os.environ["TMPDIR"] = "/home/criolo/storage/tmp"
 for path in [os.environ["HF_HOME"], os.environ["WANDB_DIR"], os.environ["TMPDIR"]]:
     os.makedirs(path, exist_ok=True)
 
-from utils.wb_utils import HPOWandbCallback
 import logging
 import yaml
 import evaluate
@@ -49,7 +48,6 @@ class TrainingTranslationScript:
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.config["model"],
             token=self.token,
-            src_lang="en_XX",
         )
 
         self.model = AutoModelForSeq2SeqLM.from_pretrained(
@@ -77,9 +75,13 @@ class TrainingTranslationScript:
         )
         self.output_base_dir = os.path.abspath(raw_output_dir)
 
-        self.model, self.tokenizer = self._fn_add_special_tokens(self.model, self.tokenizer)
+        if "mbart" in self.config["model"]:
+            self.model, self.tokenizer = self._add_mbart_special_token(self.model, self.tokenizer)
+        elif "nllb" in self.config["model"]:
+            self.tokenizer.src_lang = self.src_lang
 
-    def _fn_add_special_tokens(self, model, tokenizer):
+
+    def _add_mbart_special_token(self, model, tokenizer):
         num_added = tokenizer.add_special_tokens(
             {"additional_special_tokens": [self.src_lang]},
             replace_extra_special_tokens=False,
@@ -132,6 +134,10 @@ class TrainingTranslationScript:
         }
 
     def model_init(self):
+        """
+        This method was implemented to initialize the model and tokenizer for HPO.
+        :return:
+        """
         tokenizer = AutoTokenizer.from_pretrained(
             self.config["model"],
             token=self.token,
@@ -145,7 +151,7 @@ class TrainingTranslationScript:
             token=self.token,
         )
 
-        model, tokenizer = self._fn_add_special_tokens(model, tokenizer)
+        model, tokenizer = self._add_mbart_special_token(model, tokenizer)
 
         return model
 
@@ -212,6 +218,7 @@ class TrainingTranslationScript:
 
         logging.info(f"Model output directory: {output_dir}")
 
+        # Refactor for optimization
         training_kwargs = {
             "output_dir": output_dir,
             "run_name": run_name,
@@ -261,7 +268,8 @@ class TrainingTranslationScript:
         trainer.train()
 
         # This puts back to the default being en_XX, otherwise when loading the model it will give an error
-        self.tokenizer.src_lang = "en_XX"
+        if self.model.config.model_type == "mbart":
+            self.tokenizer.src_lang = "en_XX"
 
         logging.info("Saving model locally...")
         trainer.save_model(output_dir)
