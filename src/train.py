@@ -17,6 +17,7 @@ import wandb
 from datasets import load_dataset
 from dotenv import load_dotenv
 from transformers import (
+    AutoConfig,
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
     DataCollatorForSeq2Seq,
@@ -45,22 +46,10 @@ class TrainingTranslationScript:
         logging.info(f'Dataset Loading {self.config["dataset"]}')
         self.dataset = load_dataset(self.config["dataset"])
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.config["model"],
-            token=self.token,
-        )
-
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(
-            self.config["model"],
-            token=self.token,
-        )
-
-        if self.config.get("gradient_checkpointing", True):
-            self.model.config.use_cache = False
-
         self.max_length = self.config["max_length"]
         self.src_lang = self.config["src_lang"]
         self.tgt_lang = self.config["tgt_lang"]
+        self.model, self.tokenizer = self._load_model_and_tokenizer()
 
         # Metrics
         self.sacrebleu = evaluate.load("sacrebleu")
@@ -75,13 +64,28 @@ class TrainingTranslationScript:
         )
         self.output_base_dir = os.path.abspath(raw_output_dir)
 
-        if "mbart" in self.config["model"]:
-            self.model, self.tokenizer = self._add_mbart_special_token(self.model, self.tokenizer)
-        elif "nllb" in self.config["model"]:
-            self.tokenizer.src_lang = self.src_lang
+    def _load_model_and_tokenizer(self):
+        """Mesma preparação para treino manual e para cada trial HPO."""
+        model_config = AutoConfig.from_pretrained(self.config["model"], token=self.token)
+        # O mBART precisa de uma língua nativa durante o construtor, mesmo
+        # quando o tokenizer guardado contém um código personalizado.
+        if model_config.model_type == "mbart":
+            tokenizer_kwargs = {"src_lang": "en_XX"}
+        else:
+            tokenizer_kwargs = {}
+        tokenizer = AutoTokenizer.from_pretrained(
+            self.config["model"], token=self.token, **tokenizer_kwargs
+        )
+        if model_config.model_type != "mbart" and "nllb" not in type(tokenizer).__name__.lower():
+            raise ValueError(
+                f"Modelo/tokenizer não suportado: {model_config.model_type}/"
+                f"{type(tokenizer).__name__}. Usa mBART ou NLLB."
+            )
+        model = AutoModelForSeq2SeqLM.from_pretrained(self.config["model"], token=self.token)
+        return self._prepare_languages(model, tokenizer)
 
-
-    def _add_mbart_special_token(self, model, tokenizer):
+    def _prepare_languages(self, model, tokenizer):
+        """Adicionar o código antes de o selecionar; configurar também generate()."""
         num_added = tokenizer.add_special_tokens(
             {"additional_special_tokens": [self.src_lang]},
             replace_extra_special_tokens=False,
@@ -94,8 +98,17 @@ class TrainingTranslationScript:
 
         if hasattr(tokenizer, "lang_code_to_id"):
             tokenizer.lang_code_to_id[self.src_lang] = token_id
-        if hasattr(self.tokenizer, "id_to_lang_code"):
+        if hasattr(tokenizer, "id_to_lang_code"):
             tokenizer.id_to_lang_code[token_id] = self.src_lang
+        target_id = tokenizer.convert_tokens_to_ids(self.tgt_lang)
+        if target_id is None or target_id == tokenizer.unk_token_id:
+            raise ValueError(f"Código de destino desconhecido: {self.tgt_lang}")
+
+        tokenizer.src_lang = self.src_lang
+        tokenizer.tgt_lang = self.tgt_lang
+        model.generation_config.forced_bos_token_id = target_id
+        if self.config.get("gradient_checkpointing", True):
+            model.config.use_cache = False
         return model, tokenizer
 
     def preprocess_function(self, examples):
@@ -134,26 +147,16 @@ class TrainingTranslationScript:
         }
 
     def model_init(self):
-        """
-        This method was implemented to initialize the model and tokenizer for HPO.
-        :return:
-        """
-        tokenizer = AutoTokenizer.from_pretrained(
-            self.config["model"],
-            token=self.token,
-        )
-
-        tokenizer.src_lang = self.src_lang
-        tokenizer.tgt_lang = self.tgt_lang
-
-        model = AutoModelForSeq2SeqLM.from_pretrained(
-            self.config["model"],
-            token=self.token,
-        )
-
-        model, tokenizer = self._add_mbart_special_token(model, tokenizer)
-
+        # Dados e collator já usam self.tokenizer: os IDs têm de coincidir.
+        model, tokenizer = self._load_model_and_tokenizer()
+        if tokenizer.get_vocab() != self.tokenizer.get_vocab():
+            raise ValueError("O vocabulário do trial difere do usado no preprocessing.")
         return model
+
+    @staticmethod
+    def _compute_objective(metrics):
+        # TER é melhor quando menor: não somar métricas com direções distintas.
+        return metrics["eval_chrf"]
 
     def _hp_space(self, trial):
         return {
@@ -254,8 +257,7 @@ class TrainingTranslationScript:
             callbacks.append(EarlyStoppingCallback(early_stopping_patience=patience))
 
         trainer = Seq2SeqTrainer(
-            model=self.model if not self.config.get("hyperparameter_search", False) else None,
-            model_init=self._model_init if self.config.get("hyperparameter_search", False) else None,
+            model=self.model,
             args=args,
             train_dataset=tokenized_datasets["train"],
             eval_dataset=tokenized_datasets["validation"],
@@ -356,6 +358,7 @@ class TrainingTranslationScript:
 
         best_run = trainer.hyperparameter_search(
             direction="maximize",
+            compute_objective=self._compute_objective,
             hp_space=self._hp_space,
             hp_name=self._hp_name,
             n_trials=self.config.get("hpo_trials", 10),
