@@ -1,82 +1,79 @@
-# ──────────────────────────────────────────────
-# W&B
-# ──────────────────────────────────────────────
-project: "Translation Models"
-group_name: "m2m100_SV_HPO"
-
-# ──────────────────────────────────────────────
-# Local saving
-# ──────────────────────────────────────────────
-output_base_dir: "/home/criolo/storage/models_outputs/translation_models/m2m100-sv"
-
-# ──────────────────────────────────────────────
-# Model & Tokenizer
-# ──────────────────────────────────────────────
-model: "facebook/m2m100_418M"
-
-torch_dtype: "bfloat16"
-
-# Custom Cape Verdean Creole language
-src_lang: "kea_sv_XX"
-
-# M2M-100 Portuguese language code
-tgt_lang: "pt"
-
-# ──────────────────────────────────────────────
-# Dataset
-# ──────────────────────────────────────────────
-dataset: "Iscte-Sintra/Korpora_paralela_sv"
-
-max_length: 128
-
-# ──────────────────────────────────────────────
-# HPO
-# ──────────────────────────────────────────────
-hyperparameter_search: true
-hpo_trials: 50
-
-# ──────────────────────────────────────────────
-# Training
-# ──────────────────────────────────────────────
-# These parameters remain fixed during HPO.
-# Optimized parameters are supplied by Optuna.
-
-per_device_eval_batch_size: 64
-
-warmup_steps: 100
-
-weight_decay: 0.01
-
-logging_steps: 10
-
-# Evaluate after every epoch
-eval_strategy: "epoch"
-
-# Do not save checkpoints during HPO
-save_strategy: "no"
-
-fp16: false
-bf16: true
-
-gradient_checkpointing: true
-
-early_stopping_patience: 3
-
-generation_num_beams: 5
-
-# ──────────────────────────────────────────────
-# HPO Objective
-# ──────────────────────────────────────────────
-metric_for_best_model: "eval_loss"
-
-greater_is_better: true
-
-# ──────────────────────────────────────────────
-# Push to Hub
-# ──────────────────────────────────────────────
-# Individual HPO trials are NOT pushed.
-push_to_hub: false
-
-hub_repo_id: "Iscte-Sintra/teste01-sv"
-
-hub_private: true
+# Experiment configuration. Secrets and cache paths belong in the environment.
+model:
+  model: facebook/m2m100_418M
+  src_lang: kea_sv_XX
+  tgt_lang: pt
+data:
+  dataset: Iscte-Sintra/Korpora_paralela_sv
+  max_length: 128
+tracking:
+  project: Translation Models
+  group_name: m2m100_SV_HPO
+  run_name: cpt_m2m100_418M
+  output_base_dir: /home/criolo/storage/models_outputs/translation_models/m2m100-sv
+hub:
+  push_to_hub: false
+  hub_repo_id: Iscte-Sintra/teste01-sv
+  hub_private: true
+workflow:
+  mode: hpo
+training:
+  # Fixed settings shared by every trial.
+  per_device_eval_batch_size: 64
+  gradient_accumulation_steps: 1
+  warmup_steps: 0
+  lr_scheduler_type: linear
+  optim: adamw_torch
+  seed: 42
+  max_grad_norm: 1.0
+  logging_strategy: steps
+  logging_steps: 10
+  eval_strategy: epoch
+  save_strategy: 'no'
+  save_total_limit: 3
+  predict_with_generate: true
+  generation_num_beams: 5
+  load_best_model_at_end: false
+  metric_for_best_model: eval_chrf
+  greater_is_better: true
+  logging_nan_inf_filter: true
+  fp16: false
+  bf16: true
+  gradient_checkpointing: true
+  report_to:
+  - wandb
+  generation_max_length: 128
+hpo:
+  objective: eval_chrf
+  direction: maximize
+  trials: 50
+  search_space:
+    # Sampled settings must not also appear in training.
+    learning_rate:
+      type: float
+      low: 5.0e-06
+      high: 5.0e-05
+      log: true
+    per_device_train_batch_size:
+      type: categorical
+      choices:
+      - 8
+      - 16
+      - 32
+    num_train_epochs:
+      type: int
+      low: 3
+      high: 10
+    label_smoothing_factor:
+      type: float
+      low: 0.0
+      high: 0.2
+    warmup_ratio:
+      type: float
+      low: 0.0
+      high: 0.15
+    weight_decay:
+      type: float
+      low: 0.0001
+      high: 0.1
+      log: true

@@ -5,16 +5,15 @@ initialization failures during authentication or model loading precede tracking.
 """
 import os
 
-# Redirect HF Cache, W&B, and Temp directories to the 1TB network drive
-os.environ["HF_HOME"] = "/home/criolo/storage/.cache/huggingface"
-os.environ["WANDB_DIR"] = "/home/criolo/storage/.cache/wandb"
-os.environ["TMPDIR"] = "/home/criolo/storage/tmp"
+from dotenv import load_dotenv
 
-for path in [os.environ["HF_HOME"], os.environ["WANDB_DIR"], os.environ["TMPDIR"]]:
-    os.makedirs(path, exist_ok=True)
+load_dotenv()
+for variable in ('HF_HOME', 'WANDB_DIR', 'TMPDIR'):
+    if os.getenv(variable):
+        os.makedirs(os.environ[variable], exist_ok=True)
 
 import logging
-import yaml
+from utils.configuration import load_configuration
 import evaluate
 import numpy as np
 import torch
@@ -76,11 +75,12 @@ class TrainingTranslationScript:
         happens here, before the tracked execution starts in ``run()``.
         """
         print("CUDA Available:", torch.cuda.is_available())
-        wandb.login(key=os.environ["WANDB_API_KEY"])
 
         logging.info(f"Config YAML file parsing from {config_path}")
-        with open(config_path, "r") as file:
-            self.config = yaml.safe_load(file)
+        self.experiment_config, self.config = load_configuration(config_path)
+        # Validate Trainer fields before authentication or model downloads.
+        Seq2SeqTrainingArguments(output_dir="config-validation", **self._configured_training_kwargs())
+        wandb.login(key=os.environ["WANDB_API_KEY"])
 
         self.token = os.getenv("HF_TOKEN")
         if not self.token:
@@ -101,10 +101,7 @@ class TrainingTranslationScript:
         self.ter = evaluate.load("ter")
 
         # Resolve storage directory safely
-        raw_output_dir = self.config.get(
-            "output_base_dir",
-            "/home/criolo/storage/models_outputs/translation_models",
-        )
+        raw_output_dir = self.config['output_base_dir']
         self.output_base_dir = os.path.abspath(raw_output_dir)
 
     def _load_model_and_tokenizer(self):
@@ -161,7 +158,7 @@ class TrainingTranslationScript:
         tokenizer.src_lang = self.src_lang
         tokenizer.tgt_lang = self.tgt_lang
         model.generation_config.forced_bos_token_id = target_id
-        if self.config.get("gradient_checkpointing", True):
+        if self.experiment_config["training"]["gradient_checkpointing"]:
             model.config.use_cache = False
         return model, tokenizer
 
@@ -218,57 +215,27 @@ class TrainingTranslationScript:
             raise ValueError("The trial vocabulary differs from the preprocessing vocabulary.")
         return model
 
-    @staticmethod
-    def _compute_objective(metrics):
-        """Return validation chrF as the scalar objective to maximize during HPO."""
-        # Lower TER is better: do not sum metrics with opposing directions.
-        return metrics["eval_chrf"]
+    def _compute_objective(self, metrics):
+        """Read the scalar objective selected in the HPO configuration."""
+        return metrics[self.experiment_config['hpo']['objective']]
 
     def _hp_space(self, trial):
-        """Sample training hyperparameters from the configured Optuna search ranges."""
-        return {
-            "learning_rate": trial.suggest_float(
-                "learning_rate",
-                5e-6,
-                5e-5,
-                log=True,
-            ),
-
-            "per_device_train_batch_size": trial.suggest_categorical(
-                "per_device_train_batch_size",
-                [8, 16, 32],
-            ),
-
-            "num_train_epochs": trial.suggest_int(
-                "num_train_epochs",
-                3,
-                10,
-            ),
-
-            "label_smoothing_factor": trial.suggest_float(
-                "label_smoothing_factor",
-                0.0,
-                0.2,
-            ),
-
-            "warmup_ratio": trial.suggest_float(
-                "warmup_ratio",
-                0.0,
-                0.15,
-            ),
-
-            "weight_decay": trial.suggest_float(
-                "weight_decay",
-                1e-4,
-                0.1,
-                log=True,
-            ),
-        }
+        """Sample parameters using the search space declared in YAML."""
+        values = {}
+        for name, specification in self.experiment_config['hpo']['search_space'].items():
+            options = dict(specification)
+            kind = options.pop('type')
+            values[name] = getattr(trial, f'suggest_{kind}')(name, **options)
+        return values
 
     def _hp_name(self, trial):
         """Build a trial name containing the group, parent run ID and trial number."""
         group_name = self.config.get("group_name", "hpo")
         return f"{group_name}_{self.tracking.run_id}_trial_{trial.number:02d}"
+
+    def _configured_training_kwargs(self):
+        """Return the single YAML source of effective Trainer settings."""
+        return dict(self.experiment_config['training'])
 
     def manual_training(self, tokenized_datasets, data_collator):
         """Train, evaluate the selected checkpoint, export and optionally publish.
@@ -289,7 +256,7 @@ class TrainingTranslationScript:
             group=self.config.get("group_name", None),
             job_type="training",
             name=run_name,
-            config={**self.config},
+            config=self.experiment_config,
         )
         self.tracking.write('wandb.json', {'id': run.id, 'url': run.url})
 
@@ -299,32 +266,8 @@ class TrainingTranslationScript:
         logging.info(f"Model output directory: {output_dir}")
 
         # Build the effective arguments separately from the requested YAML config.
-        training_kwargs = {
-            "output_dir": output_dir,
-            "run_name": run_name,
-            "num_train_epochs": self.config.get("num_train_epochs", 3),
-            "per_device_train_batch_size": self.config.get("per_device_train_batch_size", 64),
-            "per_device_eval_batch_size": self.config.get("per_device_eval_batch_size", 64),
-            "learning_rate": float(self.config.get("learning_rate", 2e-5)),
-            "warmup_steps": self.config.get("warmup_steps", 100),
-            "weight_decay": self.config.get("weight_decay", 0.01),
-            "logging_steps": self.config.get("logging_steps", 10),
-            "eval_strategy": self.config.get("eval_strategy", "epoch"),
-            "save_strategy": self.config.get("save_strategy", "epoch"),
-            "save_total_limit": self.config.get("save_total_limit", 3),
-            "predict_with_generate": True,
-            "generation_max_length": self.max_length,
-            "generation_num_beams": self.config.get("generation_num_beams", 5),
-            "load_best_model_at_end": True,
-            "metric_for_best_model": self.config.get("metric_for_best_model", "eval_SacreBleu"),
-            "greater_is_better": self.config.get("greater_is_better", True),
-            "max_grad_norm": 1.0,
-            "logging_nan_inf_filter": True,
-            "fp16": self.config.get("fp16", False),
-            "bf16": self.config.get("bf16", True),
-            "gradient_checkpointing": self.config.get("gradient_checkpointing", True),
-            "report_to": "wandb",
-        }
+        training_kwargs = self._configured_training_kwargs()
+        training_kwargs.update(output_dir=output_dir, run_name=run_name)
 
         args = Seq2SeqTrainingArguments(**training_kwargs)
         self.tracking.write('training_args.json', args.to_dict())
@@ -332,6 +275,8 @@ class TrainingTranslationScript:
         callbacks = []
         patience = self.config.get("early_stopping_patience")
         if patience:
+            if not args.load_best_model_at_end:
+                raise ValueError('Early stopping requires load_best_model_at_end: true.')
             callbacks.append(EarlyStoppingCallback(early_stopping_patience=patience))
 
         trainer = Seq2SeqTrainer(
@@ -400,39 +345,9 @@ class TrainingTranslationScript:
         os.environ["WANDB_RUN_GROUP"] = group_name
         os.environ["WANDB_LOG_MODEL"] = "false"
 
-        training_args = Seq2SeqTrainingArguments(
-            output_dir=hpo_output_dir,
-
-            report_to=["wandb"],
-
-            eval_strategy="epoch",
-            predict_with_generate=True,
-
-            generation_max_length=self.max_length,
-            generation_num_beams=self.config.get(
-                "generation_num_beams",
-                5,
-            ),
-
-            logging_strategy="steps",
-            logging_steps=self.config.get(
-                "logging_steps",
-                10,
-            ),
-
-            save_strategy="no",
-
-            metric_for_best_model="eval_chrf",
-            greater_is_better=True,
-
-            bf16=self.config.get("bf16", True),
-            fp16=self.config.get("fp16", False),
-
-            gradient_checkpointing=self.config.get(
-                "gradient_checkpointing",
-                True,
-            ),
-        )
+        hpo_kwargs = self._configured_training_kwargs()
+        hpo_kwargs['output_dir'] = hpo_output_dir
+        training_args = Seq2SeqTrainingArguments(**hpo_kwargs)
         self.tracking.write('training_args.json', training_args.to_dict())
         self.trial_tracking = TrialTrackingCallback(self.tracking)
 
@@ -450,11 +365,11 @@ class TrainingTranslationScript:
         )
 
         best_run = trainer.hyperparameter_search(
-            direction="maximize",
+            direction=self.experiment_config["hpo"]["direction"],
             compute_objective=self._compute_objective,
             hp_space=self._hp_space,
             hp_name=self._hp_name,
-            n_trials=self.config.get("hpo_trials", 10),
+            n_trials=self.experiment_config["hpo"]["trials"],
             backend="optuna",
         )
 
@@ -472,12 +387,12 @@ class TrainingTranslationScript:
         Exceptions are recorded and re-raised. Abrupt process termination may
         leave the status as running because cleanup cannot execute in that case.
         """
-        mode = 'hpo' if self.config.get('hyperparameter_search') else 'manual'
+        mode = self.config['mode']
         self.tracking = RunTracking(self.output_base_dir, mode)
         logging.info('Run %s: %s', self.tracking.run_id, self.tracking.path)
         exit_code = 1
         try:
-            self.tracking.write('config.json', self.config)
+            self.tracking.write('config.json', self.experiment_config)
             self._run_training()
             self.tracking.status('completed')
             exit_code = 0
@@ -502,13 +417,17 @@ class TrainingTranslationScript:
         data_collator = DataCollatorForSeq2Seq(
             self.tokenizer, model=self.model, pad_to_multiple_of=8
         )
-        if self.config.get("hyperparameter_search"):
+        if self.config['mode'] == 'hpo':
             self.hpo_training(tokenized_datasets, data_collator)
         else:
             (self.manual_training(tokenized_datasets, data_collator))
 
 
 if __name__ == "__main__":
-    script = TrainingTranslationScript(config_path="configs/config.yaml")
-    #script = TrainingTranslationScript(config_path="configs/config_hpo.yaml")
+    import argparse
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(description="Train a translation model or run HPO.")
+    parser.add_argument('--config', default=str(Path(__file__).parent / 'configs/config.yaml'))
+    script = TrainingTranslationScript(config_path=parser.parse_args().config)
     script.run()

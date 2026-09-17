@@ -1,113 +1,51 @@
-# ──────────────────────────────────────────────
-# W&B
-# ──────────────────────────────────────────────
-project: "Translation Models"
-group_name: "mbart_SV_manual"
-run_name: "mbart_v1.0-stable"
-
-# ──────────────────────────────────────────────
-# Local saving
-# ──────────────────────────────────────────────
-output_base_dir: "/home/criolo/storage/models_outputs/translation_models"
-
-# ──────────────────────────────────────────────
-# Model & Tokenizer
-# ──────────────────────────────────────────────
-model: "Iscte-Sintra/mbart-51-stable"
-torch_dtype: "bfloat16"
-
-src_lang: "kea_sv_XX"
-tgt_lang: "pt_XX"
-
-# ──────────────────────────────────────────────
-# Dataset
-# ──────────────────────────────────────────────
-dataset: "Iscte-Sintra/Korpora_paralela_sv"
-
-text_column: "text"
-
-remove_columns:
-  - text
-  - category
-  - language
-
-max_length: 128
-
-# ──────────────────────────────────────────────
-# Training
-# ──────────────────────────────────────────────
-num_train_epochs: 4
-
-per_device_train_batch_size: 32
-per_device_eval_batch_size: 8
-gradient_accumulation_steps: 1
-
-# HPO best parameters
-learning_rate: 0.000026108036044530897
-lr_scheduler_type: "linear"
-
-warmup_steps: 0
-warmup_ratio: 0.12244372557366943
-
-weight_decay: 0.0007492285663778082
-label_smoothing_factor: 0.03609320459860353
-
-max_grad_norm: 1.0
-
-optim: "adamw_torch_fused"
-
-seed: 42
-
-# ──────────────────────────────────────────────
-# Precision / Memory
-# ──────────────────────────────────────────────
-fp16: false
-bf16: true
-
-gradient_checkpointing: true
-
-# ──────────────────────────────────────────────
-# Evaluation
-# ──────────────────────────────────────────────
-eval_strategy: "epoch"
-
-predict_with_generate: true
-generation_num_beams: 5
-generation_max_length: 128
-
-metric_for_best_model: "eval_chrf"
-greater_is_better: true
-
-load_best_model_at_end: true
-
-# ──────────────────────────────────────────────
-# Saving
-# ──────────────────────────────────────────────
-save_strategy: "epoch"
-save_total_limit: 2
-
-# ──────────────────────────────────────────────
-# Early Stopping
-# ──────────────────────────────────────────────
-early_stopping_patience: 3
-
-# ──────────────────────────────────────────────
-# HPO
-# ──────────────────────────────────────────────
-hyperparameter_search: false
-
-# ──────────────────────────────────────────────
-# Logging
-# ──────────────────────────────────────────────
-report_to:
+# Experiment configuration. Secrets and cache paths belong in the environment.
+model:
+  model: Iscte-Sintra/mbart-51-stable
+  src_lang: kea_sv_XX
+  tgt_lang: pt_XX
+data:
+  dataset: Iscte-Sintra/Korpora_paralela_sv
+  max_length: 128
+tracking:
+  project: Translation Models
+  group_name: mbart_SV_manual
+  run_name: mbart_v1.0-stable
+  output_base_dir: /home/criolo/storage/models_outputs/translation_models
+hub:
+  push_to_hub: true
+  hub_repo_id: Iscte-Sintra/mbart-51-stable-v1.0
+  hub_private: false
+workflow:
+  early_stopping_patience: 3
+  mode: manual
+training:
+  num_train_epochs: 4
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 1
+  learning_rate: 2.6108036044530897e-05
+  warmup_steps: 0
+  warmup_ratio: 0.12244372557366943
+  weight_decay: 0.0007492285663778082
+  label_smoothing_factor: 0.03609320459860353
+  lr_scheduler_type: linear
+  optim: adamw_torch_fused
+  seed: 42
+  max_grad_norm: 1.0
+  logging_strategy: steps
+  logging_steps: 10
+  eval_strategy: epoch
+  save_strategy: epoch
+  save_total_limit: 2
+  predict_with_generate: true
+  generation_num_beams: 5
+  load_best_model_at_end: true
+  metric_for_best_model: eval_chrf
+  greater_is_better: true
+  logging_nan_inf_filter: true
+  fp16: false
+  bf16: true
+  gradient_checkpointing: true
+  report_to:
   - wandb
-
-logging_strategy: "steps"
-logging_steps: 10
-
-# ──────────────────────────────────────────────
-# Push to Hub
-# ──────────────────────────────────────────────
-push_to_hub: true
-hub_repo_id: Iscte-Sintra/mbart-51-stable-v1.0
-hub_private: false
+  generation_max_length: 128
