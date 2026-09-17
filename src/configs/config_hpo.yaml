@@ -1,8 +1,8 @@
 # Experiment configuration. Secrets and cache paths belong in the environment.
 model:
-  model: facebook/m2m100_418M
+  model: facebook/mbart-large-50
   src_lang: kea_sv_XX
-  tgt_lang: pt
+  tgt_lang: pt_XX
 data:
   dataset: Iscte-Sintra/Korpora_paralela_sv
   max_length: 128
@@ -31,7 +31,7 @@ training:
   logging_strategy: steps
   logging_steps: 10
   eval_strategy: epoch
-  save_strategy: 'no'
+  save_strategy: 'steps'
   save_total_limit: 3
   predict_with_generate: true
   generation_num_beams: 5

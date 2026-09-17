@@ -33,6 +33,7 @@ from transformers import (
     enable_full_determinism,
     set_seed,
 )
+from optuna.samplers import TPESampler
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -371,9 +372,9 @@ class TrainingTranslationScript:
             processing_class=self.tokenizer,
             compute_metrics=self.compute_metrics,
             callbacks=[self.trial_tracking],
+
         )
 
-        from optuna.samplers import TPESampler
 
         best_run = trainer.hyperparameter_search(
             direction=self.experiment_config["hpo"]["direction"],
