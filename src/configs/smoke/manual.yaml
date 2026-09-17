@@ -1,0 +1,53 @@
+# Integration smoke test, not a model-quality experiment.
+# Preprocessing and evaluation still use the full dataset.
+model:
+  model: facebook/mbart-large-50
+  src_lang: kea_sv_XX
+  tgt_lang: pt_XX
+data:
+  dataset: Iscte-Sintra/Korpora_paralela_sv
+  max_length: 128
+tracking:
+  project: Translation Models
+  group_name: mbart50-smoke
+  run_name: mbart-manual-smoke
+  output_base_dir: /home/criolo/storage/models_outputs/translation_models/smoke/manual
+hub:
+  push_to_hub: false
+  hub_repo_id: null
+  hub_private: true
+workflow:
+  mode: manual
+  early_stopping_patience: null
+training:
+  max_steps: 2
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 1
+  learning_rate: 0.00002
+  warmup_steps: 0
+  warmup_ratio: 0.0
+  weight_decay: 0.01
+  label_smoothing_factor: 0.0
+  lr_scheduler_type: linear
+  optim: adamw_torch
+  seed: 42
+  max_grad_norm: 1.0
+  logging_strategy: steps
+  logging_steps: 1
+  eval_strategy: steps
+  eval_steps: 2
+  save_strategy: steps
+  save_steps: 2
+  save_total_limit: 1
+  predict_with_generate: true
+  generation_num_beams: 1
+  generation_max_length: 128
+  load_best_model_at_end: true
+  metric_for_best_model: eval_chrf
+  greater_is_better: true
+  logging_nan_inf_filter: true
+  fp16: false
+  bf16: true  # Requires a BF16-compatible device.
+  gradient_checkpointing: true
+  report_to: [wandb]

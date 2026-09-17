@@ -1,0 +1,72 @@
+# Two trials with two optimizer updates each; not a quality comparison.
+# Preprocessing and evaluation still use the full dataset.
+model:
+  model: facebook/mbart-large-50
+  src_lang: kea_sv_XX
+  tgt_lang: pt_XX
+data:
+  dataset: Iscte-Sintra/Korpora_paralela_sv
+  max_length: 128
+tracking:
+  project: Translation Models
+  group_name: mbart50-smoke
+  run_name: mbart-hpo-smoke
+  output_base_dir: /home/criolo/storage/models_outputs/translation_models/smoke/hpo
+hub:
+  push_to_hub: false
+  hub_repo_id: null
+  hub_private: true
+workflow:
+  mode: hpo
+training:
+  # Fixed settings only. max_steps overrides the epoch budget.
+  max_steps: 2
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 1
+  warmup_steps: 0
+  lr_scheduler_type: linear
+  optim: adamw_torch
+  seed: 42
+  max_grad_norm: 1.0
+  logging_strategy: steps
+  logging_steps: 1
+  eval_strategy: steps
+  eval_steps: 2
+  save_strategy: "no"
+  predict_with_generate: true
+  generation_num_beams: 1
+  generation_max_length: 128
+  load_best_model_at_end: false
+  metric_for_best_model: eval_chrf
+  greater_is_better: true
+  logging_nan_inf_filter: true
+  fp16: false
+  bf16: true  # Requires a BF16-compatible device.
+  gradient_checkpointing: true
+  report_to: [wandb]
+hpo:
+  objective: eval_chrf
+  direction: maximize
+  trials: 2
+  search_space:
+    learning_rate:
+      type: float
+      low: 0.000005
+      high: 0.00005
+      log: true
+    per_device_train_batch_size:
+      type: categorical
+      choices: [1, 2]
+    label_smoothing_factor:
+      type: float
+      low: 0.0
+      high: 0.2
+    warmup_ratio:
+      type: float
+      low: 0.0
+      high: 0.15
+    weight_decay:
+      type: float
+      low: 0.0001
+      high: 0.1
+      log: true
