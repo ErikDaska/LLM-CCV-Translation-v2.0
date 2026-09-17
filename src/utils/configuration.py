@@ -9,7 +9,7 @@ SECTIONS = {
     'tracking': {'project', 'group_name', 'run_name', 'output_base_dir'},
     'hub': {'push_to_hub', 'hub_repo_id', 'hub_private'},
     'workflow': {'mode'},
-    'hpo': {'objective', 'direction', 'trials', 'search_space'},
+    'hpo': {'objective', 'direction', 'trials', 'search_space', 'sampler_seed'},
     'training': None,
 }
 
@@ -28,7 +28,7 @@ def load_configuration(path):
         raise ValueError('workflow.mode must be manual or hpo.')
     sections = dict(SECTIONS)
     if mode == 'manual':
-        # Este pop está aqui a fazer o quê? Partimos do pressuposto que o manual não terá informações sobre o HPO
+        # Remove HPO from the allowed schema, not from the user's configuration.
         sections.pop('hpo')
         sections['workflow'] = {'mode', 'early_stopping_patience'}
     if set(config) != set(sections):
@@ -44,6 +44,12 @@ def load_configuration(path):
         if section not in ('training', 'hpo'):
             application.update(values)
     training = config['training']
+    for key in ('seed', 'data_seed'):
+        value = training.get(key)
+        if type(value) is not int or not 0 <= value < 2**32:
+            raise ValueError(f'training.{key} must be an integer in [0, 2**32).')
+    if type(training.get('full_determinism')) is not bool:
+        raise ValueError('training.full_determinism must be an explicit boolean.')
 
     if {'output_dir', 'run_name', 'push_to_hub', 'hub_token'} & training.keys():
         raise ValueError('Run paths and Hub publication are managed by the application.')
@@ -77,6 +83,8 @@ def load_configuration(path):
         return config, application
 
     hpo = config['hpo']
+    if type(hpo['sampler_seed']) is not int or not 0 <= hpo['sampler_seed'] < 2**32:
+        raise ValueError('hpo.sampler_seed must be an integer in [0, 2**32).')
     if hpo['objective'] not in {'eval_chrf', 'eval_SacreBleu', 'eval_meteor', 'eval_ter', 'eval_loss'}:
         raise ValueError('Unknown HPO objective.')
     expected = 'minimize' if hpo['objective'] in {'eval_ter', 'eval_loss'} else 'maximize'

@@ -32,6 +32,8 @@ training:
   lr_scheduler_type: linear
   optim: adamw_torch
   seed: 42
+  data_seed: 42
+  full_determinism: true
   max_grad_norm: 1.0
   logging_strategy: steps
   logging_steps: 1

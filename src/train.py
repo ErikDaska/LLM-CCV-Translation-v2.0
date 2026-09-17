@@ -30,6 +30,8 @@ from transformers import (
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
     TrainerCallback,
+    enable_full_determinism,
+    set_seed,
 )
 
 load_dotenv()
@@ -110,6 +112,13 @@ class TrainingTranslationScript:
         Raises:
             ValueError: The model/tokenizer family is neither mBART nor NLLB.
         """
+        # Reset before loading weights AND initializing any new token embeddings.
+        # Every HPO trial starts from the same random initialization conditions.
+        training = self.experiment_config['training']
+        if training['full_determinism']:
+            enable_full_determinism(training['seed'])
+        else:
+            set_seed(training['seed'])
         model_config = AutoConfig.from_pretrained(self.config["model"], token=self.token)
         # mBART requires a native language during construction, even when
         # the saved tokenizer contains a custom language token.
@@ -364,6 +373,8 @@ class TrainingTranslationScript:
             callbacks=[self.trial_tracking],
         )
 
+        from optuna.samplers import TPESampler
+
         best_run = trainer.hyperparameter_search(
             direction=self.experiment_config["hpo"]["direction"],
             compute_objective=self._compute_objective,
@@ -371,6 +382,8 @@ class TrainingTranslationScript:
             hp_name=self._hp_name,
             n_trials=self.experiment_config["hpo"]["trials"],
             backend="optuna",
+            sampler=TPESampler(seed=self.experiment_config['hpo']['sampler_seed']),
+            n_jobs=1,  # Parallel trial completion order changes adaptive sampling.
         )
 
         logging.info("Best HPO run: %s", best_run)

@@ -25,6 +25,8 @@ training:
   lr_scheduler_type: linear
   optim: adamw_torch
   seed: 42
+  data_seed: 42
+  full_determinism: false
   max_grad_norm: 1.0
   logging_strategy: steps
   logging_steps: 10
@@ -44,6 +46,7 @@ training:
   - wandb
   generation_max_length: 128
 hpo:
+  sampler_seed: 42
   objective: eval_chrf
   direction: maximize
   trials: 50
