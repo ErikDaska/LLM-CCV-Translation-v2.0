@@ -32,6 +32,7 @@ from transformers import (
     TrainerCallback,
     enable_full_determinism,
     set_seed,
+    AutoConfig, M2M100Tokenizer,
 )
 
 load_dotenv()
@@ -91,58 +92,72 @@ class TrainingTranslationScript:
         raw_output_dir = self.config["tracking"]["output_base_dir"]
         return os.path.abspath(raw_output_dir)
 
-
     def _load_model_and_tokenizer(self):
-        """Return a fresh model/tokenizer pair prepared for manual training or HPO.
-
-        Raises:
-            ValueError: The model/tokenizer family is neither mBART nor NLLB.
-        """
-        # Reset before loading weights AND initializing any new token embeddings.
-        # Every HPO trial starts from the same random initialization conditions.
-
         model_id = self.config["model"]["model_name"]
-        # mBART requires a native language during construction, even when
-        # the saved tokenizer contains a custom language token.
-        if "mbart" in model_id:
-            tokenizer_kwargs = {"src_lang": "en_XX"}
-        else:
-            tokenizer_kwargs = {}
-        tokenizer = AutoTokenizer.from_pretrained(model_id, token=self.token, **tokenizer_kwargs)
+        model_config = AutoConfig.from_pretrained( model_id, token=self.token)
+        tokenizer_kwargs = {}
 
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_id, token=self.token)
+        if model_config.model_type == "mbart":
+            tokenizer_kwargs["src_lang"] = "en_XX"
+        elif model_config.model_type == "m2m_100":
+            tokenizer_kwargs["src_lang"] = "en"
+
+        tokenizer = AutoTokenizer.from_pretrained( model_id, token=self.token,  **tokenizer_kwargs)
+
+        model = AutoModelForSeq2SeqLM.from_pretrained( model_id, token=self.token)
         return self._prepare_languages(model, tokenizer)
 
-
     def _prepare_languages(self, model, tokenizer):
-        """Register the source token, select languages and configure generation.
+        is_m2m100 = isinstance(tokenizer, M2M100Tokenizer)
 
-            Mutates and returns the supplied model and tokenizer. Embeddings are
-            resized only when tokens are added. The target token must already exist.
+        # Preserva o token nativo quando a origem já é uma língua suportada.
+        if is_m2m100 and self.src_lang in tokenizer.lang_code_to_token:
+            source_token = tokenizer.lang_code_to_token[self.src_lang]
+        else:
+            source_token = self.src_lang
 
-            Raises:
-                ValueError: The target language token is missing from the vocabulary.
-            """
-        num_added = tokenizer.add_special_tokens(
-            {"additional_special_tokens": [self.src_lang]},
+        tokenizer.add_special_tokens(
+            {"additional_special_tokens": [source_token]},
             replace_extra_special_tokens=False,
         )
 
-        if num_added > 0:
-            model.resize_token_embeddings(len(tokenizer))
+        source_id = tokenizer.convert_tokens_to_ids(source_token)
 
-        tokenizer.src_lang = self.src_lang
-        tokenizer.tgt_lang = self.tgt_lang
+        if source_id is None or source_id == tokenizer.unk_token_id:
+            raise ValueError(f"Token de origem inválido: {source_token}")
 
-        target_id = tokenizer.convert_tokens_to_ids(self.tgt_lang)
+        if is_m2m100:
+            # Regista também línguas personalizadas.
+            tokenizer.lang_code_to_token[self.src_lang] = source_token
+            tokenizer.lang_code_to_id[self.src_lang] = source_id
+            tokenizer.lang_token_to_id[source_token] = source_id
+            tokenizer.id_to_lang_token[source_id] = source_token
+
+            if self.tgt_lang not in tokenizer.lang_code_to_id:
+                raise ValueError( f"Língua de destino desconhecida: {self.tgt_lang}")
+
+            target_id = tokenizer.get_lang_id(self.tgt_lang)
+        else:
+            target_id = tokenizer.convert_tokens_to_ids(self.tgt_lang)
 
         if target_id is None or target_id == tokenizer.unk_token_id:
             raise ValueError(f"Língua de destino desconhecida: {self.tgt_lang}")
+
+        # Garante espaço para os IDs sem reduzir embeddings já existentes.
+        required_size = max( len(tokenizer), source_id + 1, target_id + 1)
+        current_size = model.get_input_embeddings().num_embeddings
+
+        if required_size > current_size:
+            model.resize_token_embeddings(required_size)
+
+        tokenizer.src_lang = self.src_lang
+        tokenizer.tgt_lang = self.tgt_lang
 
         model.generation_config.forced_bos_token_id = target_id
 
         if self.config["training_arguments"]["gradient_checkpointing"]:
             model.config.use_cache = False
+
         return model, tokenizer
 
     def preprocess_function(self, examples):
@@ -210,7 +225,6 @@ class TrainingTranslationScript:
         model_name_clean = self.config["model"]["model_name"].split("/")[-1]
         tracking_parameters = self.config["tracking"]
         run_name = tracking_parameters.get("run_name", f"cpt_{model_name_clean}")
-
 
         run = wandb.init(
             id=self.tracking.run_id,
@@ -333,6 +347,6 @@ if __name__ == "__main__":
     from pathlib import Path
 
     parser = argparse.ArgumentParser(description="Train a translation model or run HPO.")
-    parser.add_argument('--config', default=str(Path(__file__).parent / 'configs/smoke/manual.yaml'))
+    parser.add_argument('--config', default=str(Path(__file__).parent / 'configs/config.yaml'))
     script = TrainingTranslationScript(config_path=parser.parse_args().config)
     script.run()
