@@ -12,6 +12,7 @@ for variable in ('HF_HOME', 'WANDB_DIR', 'TMPDIR'):
     if os.getenv(variable):
         os.makedirs(os.environ[variable], exist_ok=True)
 
+from functools import partial
 import logging
 from utils.configuration import load_training_configuration
 import evaluate
@@ -133,6 +134,13 @@ class TrainingTranslationScript:
         tokenizer.src_lang = self.src_lang
         tokenizer.tgt_lang = self.tgt_lang
 
+        target_id = tokenizer.convert_tokens_to_ids(self.tgt_lang)
+
+        if target_id is None or target_id == tokenizer.unk_token_id:
+            raise ValueError(f"Língua de destino desconhecida: {self.tgt_lang}")
+
+        model.generation_config.forced_bos_token_id = target_id
+
         if self.config["training_arguments"]["gradient_checkpointing"]:
             model.config.use_cache = False
         return model, tokenizer
@@ -147,29 +155,34 @@ class TrainingTranslationScript:
             text_target=examples["translation"],
             max_length=self.max_length,
             truncation=True,
+            padding=False,
         )
 
-    def compute_metrics(self, eval_preds):
+    def compute_metrics(self, eval_preds, *, references):
         """Decode generated token IDs and return BLEU, chrF, METEOR and TER.
 
-        Args:
-            eval_preds: Predictions and labels provided by Seq2SeqTrainer.
-                Label padding uses -100 and is replaced before decoding.
+            Args:
+                eval_preds: Predictions and labels provided by Seq2SeqTrainer.
+                    Label padding uses -100 and is replaced before decoding.
 
-        Returns:
-            Metric scores; higher is better except for TER.
+            Returns:
+                Metric scores; higher is better except for TER.
         """
-        preds, labels = eval_preds
+        preds = eval_preds.predictions
+
         if isinstance(preds, tuple):
             preds = preds[0]
 
-        decoded_preds = self.tokenizer.batch_decode(preds, skip_special_tokens=True)
-        labels = np.where(labels != -100, labels, self.tokenizer.pad_token_id)
-        decoded_labels = self.tokenizer.batch_decode(labels, skip_special_tokens=True)
-
+        preds = np.where( preds != -100, preds, self.tokenizer.pad_token_id)
+        decoded_preds = self.tokenizer.batch_decode( preds, skip_special_tokens=True)
         decoded_preds = [pred.strip() for pred in decoded_preds]
-        decoded_labels = [[label.strip()] for label in decoded_labels]
+        # Referências originais, sem tokenização nem truncagem.
+        decoded_labels = [[text.strip()] for text in references]
 
+        if len(decoded_preds) != len(decoded_labels):
+            raise ValueError(f"Número de previsões ({len(decoded_preds)}) diferente do número de referências ({len(decoded_labels)}).")
+
+        # A partir daqui, mantém as chamadas às métricas e o return atuais.
         sacrebleu_result = self.sacrebleu.compute(predictions=decoded_preds, references=decoded_labels)
         chrf_result = self.chrf.compute(predictions=decoded_preds, references=decoded_labels)
         meteor_results = self.meteor.compute(predictions=decoded_preds, references=decoded_labels)
@@ -223,13 +236,13 @@ class TrainingTranslationScript:
         self.tracking.write('training_args.json', args.to_dict())
 
         callbacks = []
-        # TODO: Rever
-        #patience = self.config.get("early_stopping_patience")
-        #if patience:
-        #    if not args.load_best_model_at_end:
-        #        raise ValueError('Early stopping requires load_best_model_at_end: true.')
-        #    callbacks.append(EarlyStoppingCallback(early_stopping_patience=patience))
+        patience = self.config["early_stopping_patience"]
+        if patience:
+            if not args.load_best_model_at_end:
+                raise ValueError('Early stopping requires load_best_model_at_end: true.')
+            callbacks.append(EarlyStoppingCallback(early_stopping_patience=patience))
 
+        validation_compute_metrics = partial(self.compute_metrics, references=tuple(self.dataset["validation"]["translation"]))
         trainer = Seq2SeqTrainer(
             model=self.model,
             args=args,
@@ -237,7 +250,7 @@ class TrainingTranslationScript:
             eval_dataset=tokenized_datasets["validation"],
             data_collator=data_collator,
             processing_class=self.tokenizer,
-            compute_metrics=self.compute_metrics,
+            compute_metrics=validation_compute_metrics,
             callbacks=callbacks,
         )
 
