@@ -188,28 +188,38 @@ class HPOTrainingScript:
             temporary.write_text(content + "\n", encoding="utf-8")
             temporary.replace(path)
 
-    def run(self):
-        output = Path(self.config["tracking"]["output_base_dir"])
-        self.summary_dir.mkdir(parents=True, exist_ok=True)
-        (self.summary_dir / "study_config.yaml").write_text(yaml.safe_dump(self.config, sort_keys=False))
-        min_free = float(self.hpo.get("min_free_disk_gb", 0))
-        free_gb = shutil.disk_usage(output).free / (1024 ** 3)
-        if free_gb < min_free:
-            raise RuntimeError(f"Not enough free space for HPO: {free_gb:.1f} GB < {min_free:.1f} GB")
-        logger.info("Disk space available: %.1f GB", free_gb)
+    def _create_storage(self):
+        """Use a persistent journal when SQLite file locking is unavailable."""
+        configured = self.hpo["storage"]
+        if isinstance(configured, dict):
+            if configured.get("type") != "journal" or not configured.get("path"):
+                raise ValueError("hpo.storage requires type: journal and a non-empty path")
+            path = Path(configured["path"]).expanduser().resolve()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            logger.info("Optuna journal: %s", path)
+            return optuna.storages.JournalStorage(
+                optuna.storages.journal.JournalFileBackend(str(path))
+            )
 
-        storage_url = self.hpo["storage"]
+        # Keep URL-based storage supported for existing SQLite/MySQL configs.
+        storage_url = configured
+        if not isinstance(storage_url, str):
+            raise ValueError("hpo.storage must be a database URL or a journal configuration")
         if storage_url.startswith("sqlite:///"):
             db_path = storage_url[len("sqlite:///"):]
             if db_path and db_path != ":memory:":
                 Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-        storage = optuna.storages.RDBStorage(
+        return optuna.storages.RDBStorage(
             url=storage_url,
             heartbeat_interval=int(self.hpo.get("heartbeat_seconds", 60)),
             grace_period=int(self.hpo.get("heartbeat_grace_seconds", 300)),
             engine_kwargs={"connect_args": {"timeout": 60}} if storage_url.startswith("sqlite:") else None,
         )
+
+    def _load_study(self):
+        """Open/create the study during preflight too, before allocating training time."""
+        storage = self._create_storage()
         study = optuna.create_study(
             study_name=self.hpo["study_name"],
             storage=storage,
@@ -225,14 +235,36 @@ class HPOTrainingScript:
                 interval_steps=1,
             ),
         )
-        # Mark heartbeat-stale RUNNING trials from previous crashed processes as FAIL.
-        optuna.storages.fail_stale_trials(study)
         fingerprint = self._config_fingerprint()
         current = study.user_attrs.get("hpo_config_fingerprint")
         if current is not None and current != fingerprint:
             raise ValueError("Existing study uses different model/data/search settings. Choose a new study_name/storage.")
         if current is None:
             study.set_user_attr("hpo_config_fingerprint", fingerprint)
+        return study
+
+    def run(self):
+        output = Path(self.config["tracking"]["output_base_dir"])
+        self.summary_dir.mkdir(parents=True, exist_ok=True)
+        (self.summary_dir / "study_config.yaml").write_text(yaml.safe_dump(self.config, sort_keys=False))
+        min_free = float(self.hpo.get("min_free_disk_gb", 0))
+        free_gb = shutil.disk_usage(output).free / (1024 ** 3)
+        if free_gb < min_free:
+            raise RuntimeError(f"Not enough free space for HPO: {free_gb:.1f} GB < {min_free:.1f} GB")
+        logger.info("Disk space available: %.1f GB", free_gb)
+
+        study = self._load_study()
+        if isinstance(self.hpo["storage"], str):
+            # Heartbeats are supported by RDBStorage, not JournalStorage.
+            optuna.storages.fail_stale_trials(study)
+        else:
+            interrupted = [t.number for t in study.trials if t.state == optuna.trial.TrialState.RUNNING]
+            if interrupted:
+                logger.warning(
+                    "Journal study contains RUNNING trials %s. They count towards the trial budget; "
+                    "their training is not resumed. Ensure no other process is using this study.",
+                    interrupted,
+                )
 
         # Here 'trials' means total attempts across restarts, NOT each call to optimize.
         total = int(self.hpo["trials"])
@@ -264,12 +296,13 @@ class HPOTrainingScript:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=CONFIG_PATH)
-    parser.add_argument("--check-only", action="store_true", help="Validate configuration/GPU; no training")
+    parser.add_argument("--check-only", action="store_true", help="Validate configuration/GPU and open/create storage; no training")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     experiment = HPOTrainingScript(args.config)
     if args.check_only:
-        logger.info("Configuration and GPU validated: %s", args.config)
+        experiment._load_study()
+        logger.info("Configuration, GPU and Optuna storage validated: %s", args.config)
         return
     experiment.run()
 

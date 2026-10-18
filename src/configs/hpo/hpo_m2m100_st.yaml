@@ -57,14 +57,16 @@ training_arguments:
 
 hpo:
   study_name: m2m100_st_night_v1
-  storage: sqlite:////home/criolo/storage/models_outputs/translation_models/hpo/m2m100-st/study.db
+  # Persistent Optuna journal; avoids SQLite locking on shared storage.
+  # This is a new storage file: existing SQLite trials are not imported.
+  storage:
+    type: journal
+    path: /home/criolo/storage/models_outputs/translation_models/hpo/m2m100-st/study.journal
   sampler_seed: 42
   objective: eval_chrf
   direction: maximize
   trials: 16  # TOTAL across restarts, not new trials per run
   timeout_seconds: 14400  # 4h per model; the launcher also enforces a process time limit.
-  heartbeat_seconds: 60
-  heartbeat_grace_seconds: 300
   n_startup_trials: 5
   pruning_warmup_epochs: 2
   effective_batch_size: 32  # Single-GPU; keeps batch constant if train batch is sampled.
