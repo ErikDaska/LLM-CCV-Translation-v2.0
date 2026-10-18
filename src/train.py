@@ -1,10 +1,9 @@
-"""Train mBART/NLLB translation models or run Optuna searches with local tracking.
+"""Train mBART/NLLB translation models
 
 Cache directories are configured at import time. Run records start in ``run()``;
 initialization failures during authentication or model loading precede tracking.
 """
 import os
-
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -29,11 +28,12 @@ from transformers import (
     EarlyStoppingCallback,
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
-    TrainerCallback,
     enable_full_determinism,
     set_seed,
-    AutoConfig, M2M100Tokenizer,
+    AutoConfig,
+    M2M100Tokenizer,
 )
+from copy import deepcopy
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -41,7 +41,7 @@ logging.basicConfig(level=logging.INFO)
 
 class TrainingTranslationScript:
     """Prepare translation resources and dispatch manual training or HPO."""
-    def __init__(self, config_path: str):
+    def __init__(self, config_path=None, *, config=None):
         """Load YAML settings, authenticate, and initialize data, model and metrics.
 
         Args:
@@ -51,8 +51,13 @@ class TrainingTranslationScript:
         happens here, before the tracked execution starts in ``run()``.
         """
         print("CUDA Available:", torch.cuda.is_available())
-        logging.info(f"Config YAML file parsing from {config_path}")
-        self.config = load_training_configuration(config_path)
+        if (config_path is None) == (config is None):
+            raise ValueError("Fornece config_path ou config, exclusivamente.")
+
+        if config is not None:
+            self.config = deepcopy(config)
+        else:
+            self.config = load_training_configuration(config_path)
         # Setup paths and reproducibility
         self.output_base_dir = self.setup_reproducibility()
 
@@ -290,7 +295,11 @@ class TrainingTranslationScript:
         trainer.save_model(model_dir)
         self.tokenizer.save_pretrained(model_dir)
         self.check_push_to_hub()
-
+        return {
+            "validation_metrics": validation_metrics,
+            "best_checkpoint": trainer.state.best_model_checkpoint,
+            "run_dir": str(self.tracking.path),
+        }
 
     def check_push_to_hub(self):
         hub = self.config["hub"]
@@ -317,9 +326,11 @@ class TrainingTranslationScript:
         exit_code = 1
         try:
             self.tracking.write('config.json', self.config)
-            self._run_training()
-            self.tracking.status('completed')
+            result = self._run_training()
+
+            self.tracking.status("completed")
             exit_code = 0
+            return result
         except BaseException as error:
             self.tracking.fail(error)
             callback = getattr(self, 'trial_tracking', None)
@@ -332,15 +343,9 @@ class TrainingTranslationScript:
 
     def _run_training(self):
         """Tokenize dataset splits, create the collator and dispatch the chosen mode."""
-        tokenized_datasets = self.dataset.map(
-            self.preprocess_function,
-            batched=True,
-            remove_columns=self.dataset["train"].column_names,
-        )
-
+        tokenized_datasets = self.dataset.map(self.preprocess_function, batched=True, remove_columns=self.dataset["train"].column_names)
         data_collator = DataCollatorForSeq2Seq(self.tokenizer, model=self.model, pad_to_multiple_of=8)
-        self.manual_training(tokenized_datasets, data_collator)
-
+        return self.manual_training(tokenized_datasets, data_collator)
 
 if __name__ == "__main__":
     import argparse
@@ -349,4 +354,4 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a translation model or run HPO.")
     parser.add_argument('--config', default=str(Path(__file__).parent / 'configs/config.yaml'))
     script = TrainingTranslationScript(config_path=parser.parse_args().config)
-    script.run()
+    result = script.run()
