@@ -1,0 +1,28 @@
+# Evaluation only. Models and test data are loaded by their Hugging Face IDs.
+# Set language identifiers to those used when fine-tuning this specific model.
+model:
+  model_id: "facebook/nllb-200-distilled-600M"
+  revision: null               # recommended: exact model commit SHA
+  src_lang: "kea_Latn"        # use the exact token/code from the training YAML
+  tgt_lang: "por_Latn"        # NLLB: por_Latn; mBART: pt_XX; M2M100: pt
+
+data:
+  dataset_id: "Iscte-Sintra/Korpora_paralela_st_clean"
+  revision: null               # recommended: exact dataset commit SHA used in training
+  split: "test"
+  source_column: "original_sentence"  # KEA -> PT
+  target_column: "translation"        # for PT -> KEA invert these columns
+
+generation:
+  batch_size: 16
+  max_input_length: 128
+  max_new_tokens: 128
+  num_beams: 4
+
+tracking:
+  project: Translation Models # ideally the same W&B project as the training runs
+  entity: null                   # optional W&B team/user; uses default if null
+  group: baseline_evaluation                    # optional experiment family/group
+  run_name: nllb-600M-baseline                 # optional run display name, auto-named when null
+  preview_rows: 100              # rows shown in an interactive W&B Table; 0 disables
+  log_predictions_artifact: true # all predictions + metric signatures + YAML on W&B
