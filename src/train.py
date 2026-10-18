@@ -101,8 +101,7 @@ class TrainingTranslationScript:
 
     def _load_model_and_tokenizer(self):
         model_id = self.config["model"]["model_name"]
-        model_revision = self.config["model"]
-        model_config = AutoConfig.from_pretrained(model_id,token=self.token)
+        model_config = AutoConfig.from_pretrained(model_id, token=self.token)
         tokenizer_kwargs = {}
 
         if model_config.model_type == "mbart":

@@ -1,4 +1,4 @@
-# Replace the dataset revision before running; keep it identical across all trials.
+# Loaded by repository ID, without pinning dataset or model revisions.
 model:
   model_name: facebook/mbart-large-50
   src_lang: kea_st_XX
@@ -7,13 +7,14 @@ model:
 data:
   dataset: Iscte-Sintra/Korpora_paralela_st_clean
   max_length: 128
-  multi_reference_validation: true  # One prediction per KEA source, all valid PT references.
+  # Existing one-reference-per-pair mode: compatible with the unchanged Evaluate metrics.
+  multi_reference_validation: false
 
 tracking:
   project: Translation Models
-  group_name: mbart_st_hpo_v2
+  group_name: mbart_st_night_v1
   run_name: null
-  output_base_dir: /home/criolo/storage/models_outputs/translation_models/mbart-sv
+  output_base_dir: /home/criolo/storage/models_outputs/translation_models/hpo/mbart-st
 
 early_stopping_patience: 2
 save_final_model: false
@@ -27,7 +28,7 @@ training_arguments:
   seed: 42
   data_seed: 42
   per_device_train_batch_size: 32
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 1
   per_device_eval_batch_size: 32
   eval_accumulation_steps: 4
   num_train_epochs: 6
@@ -54,21 +55,20 @@ training_arguments:
     - wandb
 
 hpo:
-  study_name: mbart_st_hpo_v2
-  storage: sqlite:///./hpo_studies/mbart_sv_v2.db
+  study_name: mbart_st_night_v1
+  storage: sqlite:////home/criolo/storage/models_outputs/translation_models/hpo/mbart-st/study.db
   sampler_seed: 42
   objective: eval_chrf
   direction: maximize
   trials: 16  # TOTAL across restarts, not new trials per run
-  timeout_seconds: 28800  # 8h; checked between trials, not a hard cutoff
-  require_dataset_revision: true
+  timeout_seconds: 14400  # 4h per model; the launcher also enforces a process time limit.
   heartbeat_seconds: 60
   heartbeat_grace_seconds: 300
   n_startup_trials: 5
   pruning_warmup_epochs: 2
   effective_batch_size: 32  # Single-GPU; keeps batch constant if train batch is sampled.
-  keep_checkpoints: false  # Keep training metrics; delete large trial checkpoints.
-  min_free_disk_gb: 15  # Fail early if storage is insufficient at startup.
+  keep_checkpoints: true  # Retain completed trial checkpoints for evaluation tomorrow.
+  min_free_disk_gb: 30  # Checked before every trial; optimizer checkpoints can be large.
   search_space:
     learning_rate:
       type: float

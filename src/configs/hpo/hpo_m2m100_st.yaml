@@ -1,0 +1,87 @@
+# Loaded by repository ID, without pinning dataset or model revisions.
+model:
+  model_name: facebook/m2m100_418M
+  src_lang: kea_st_XX
+  tgt_lang: pt
+
+data:
+  dataset: Iscte-Sintra/Korpora_paralela_st_clean
+  max_length: 128
+  # Existing one-reference-per-pair mode: compatible with the unchanged Evaluate metrics.
+  multi_reference_validation: false
+
+tracking:
+  project: Translation Models
+  group_name: m2m100_st_night_v1
+  run_name: null
+  output_base_dir: /home/criolo/storage/models_outputs/translation_models/hpo/m2m100-st
+
+early_stopping_patience: 2
+save_final_model: false
+hub:
+  push_to_hub: false
+  hub_repo_id: null
+  hub_private: true
+
+training_arguments:
+  full_determinism: false
+  seed: 42
+  data_seed: 42
+  per_device_train_batch_size: 32
+  gradient_accumulation_steps: 1
+  per_device_eval_batch_size: 32
+  eval_accumulation_steps: 4
+  num_train_epochs: 6
+  warmup_steps: 0
+  label_smoothing_factor: 0.0  # Keep the existing collator; do not sample smoothing for this model.
+  lr_scheduler_type: linear
+  optim: adamw_torch
+  max_grad_norm: 1.0
+  logging_strategy: steps
+  logging_steps: 25
+  eval_strategy: epoch
+  save_strategy: epoch
+  save_total_limit: 1
+  predict_with_generate: true
+  generation_num_beams: 4
+  generation_max_length: 128
+  load_best_model_at_end: true
+  metric_for_best_model: eval_chrf
+  greater_is_better: true
+  logging_nan_inf_filter: true
+  fp16: false
+  bf16: true  # Only if torch.cuda.is_bf16_supported() is True.
+  gradient_checkpointing: true
+  report_to:
+    - wandb
+
+hpo:
+  study_name: m2m100_st_night_v1
+  storage: sqlite:////home/criolo/storage/models_outputs/translation_models/hpo/m2m100-st/study.db
+  sampler_seed: 42
+  objective: eval_chrf
+  direction: maximize
+  trials: 16  # TOTAL across restarts, not new trials per run
+  timeout_seconds: 14400  # 4h per model; the launcher also enforces a process time limit.
+  heartbeat_seconds: 60
+  heartbeat_grace_seconds: 300
+  n_startup_trials: 5
+  pruning_warmup_epochs: 2
+  effective_batch_size: 32  # Single-GPU; keeps batch constant if train batch is sampled.
+  keep_checkpoints: true  # Retain completed trial checkpoints for evaluation tomorrow.
+  min_free_disk_gb: 30  # Checked before every trial; optimizer checkpoints can be large.
+  search_space:
+    learning_rate:
+      type: float
+      low: 5.0e-06
+      high: 5.0e-05
+      log: true
+    weight_decay:
+      type: float
+      low: 1.0e-04
+      high: 0.1
+      log: true
+    warmup_ratio:
+      type: float
+      low: 0.0
+      high: 0.1

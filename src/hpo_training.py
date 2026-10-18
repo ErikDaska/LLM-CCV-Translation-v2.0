@@ -3,11 +3,14 @@
 from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
+import argparse
 import gc
 import json
 import logging
 import math
+import os
 import shutil
+import yaml
 
 # train configures HF_HOME / WANDB_DIR / TMPDIR before importing heavy libraries.
 from train import TrainingTranslationScript
@@ -16,7 +19,7 @@ from utils.configuration import load_training_configuration
 import optuna
 import torch
 
-CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "smoke"/ "hpo.yaml"
+CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "hpo" / "hpo_mbart_st.yaml"
 logger = logging.getLogger(__name__)
 
 
@@ -29,6 +32,8 @@ class HPOTrainingScript:
         self.config = load_training_configuration(str(config_path))
         self.hpo = self.config["hpo"]
         self._validate()
+        output = Path(self.config["tracking"]["output_base_dir"])
+        self.summary_dir = output / self.hpo["study_name"]
 
     def _validate(self):
         for key in ("study_name", "storage", "objective", "direction", "sampler_seed", "trials", "search_space"):
@@ -42,15 +47,22 @@ class HPOTrainingScript:
             raise ValueError("Pruning callback requires training_arguments.eval_strategy='epoch'")
         if not self.config["training_arguments"].get("predict_with_generate", False):
             raise ValueError("HPO on chrF requires predict_with_generate: true")
-        if self.hpo.get("require_dataset_revision", True):
-            revision = self.config["data"].get("revision")
-            if not revision or "REPLACE" in str(revision):
-                raise ValueError("Specify a real data.revision (Hugging Face commit SHA) before HPO")
         if self.config["training_arguments"].get("bf16", False):
             if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
                 raise RuntimeError("bf16: true requires a CUDA GPU with BF16 support; set bf16: false and consider fp16")
         if self.config["training_arguments"].get("fp16") and self.config["training_arguments"].get("bf16"):
             raise ValueError("Set either fp16 or bf16, not both")
+        if int(os.environ.get("WORLD_SIZE", "1")) != 1 or torch.cuda.device_count() != 1:
+            raise ValueError("Overnight HPO expects one visible GPU; do not launch with torchrun")
+        training = self.config["training_arguments"]
+        if not training.get("load_best_model_at_end") or training.get("save_strategy") != "epoch":
+            raise ValueError("Use save_strategy=epoch and load_best_model_at_end=true")
+        if training.get("metric_for_best_model") not in ("eval_chrf", "chrf") or not training.get("greater_is_better"):
+            raise ValueError("Select the best checkpoint using chrF, greater_is_better=true")
+        if self.hpo["objective"] != "eval_chrf" or self.hpo["direction"] != "maximize":
+            raise ValueError("These configurations select eval_chrf with direction=maximize")
+        if int(self.hpo["trials"]) < 1 or float(self.hpo.get("timeout_seconds", 1)) <= 0:
+            raise ValueError("trials and timeout_seconds must be positive")
 
     def _sample_parameters(self, trial):
         sampled = {}
@@ -93,6 +105,9 @@ class HPOTrainingScript:
         experiment = None
         run_dir = None
         try:
+            free_gb = shutil.disk_usage(self.summary_dir).free / (1024 ** 3)
+            if free_gb < float(self.hpo.get("min_free_disk_gb", 0)):
+                raise RuntimeError(f"Insufficient disk space before trial: {free_gb:.1f} GiB")
             experiment = TrainingTranslationScript(config=config, optuna_trial=trial)
             result = experiment.run()
             run_dir = Path(result["run_dir"])
@@ -106,6 +121,7 @@ class HPOTrainingScript:
 
             trial.set_user_attr("run_dir", str(run_dir))
             trial.set_user_attr("validation_metric", score)
+            trial.set_user_attr("validation_metrics", result["validation_metrics"])
             trial.set_user_attr("best_checkpoint_during_trial", str(result["best_checkpoint"]))
             trial.set_user_attr("checkpoints_retained", bool(self.hpo.get("keep_checkpoints", False)))
             logger.info("Trial %d COMPLETE: %s=%.4f", trial.number, metric_name, score)
@@ -148,9 +164,34 @@ class HPOTrainingScript:
         }
         return sha256(json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest()
 
+    def _save_best(self, study, trial=None):
+        """Keep completed results available even if the overnight job is stopped."""
+        if not any(t.state == optuna.trial.TrialState.COMPLETE for t in study.trials):
+            return
+        best = study.best_trial
+        config = deepcopy(self.config)
+        config["training_arguments"].update(best.params)
+        effective = self.hpo.get("effective_batch_size")
+        if effective is not None:
+            config["training_arguments"]["gradient_accumulation_steps"] = (
+                effective // config["training_arguments"].get("per_device_train_batch_size", 8)
+            )
+        config.pop("hpo", None)
+        config["save_final_model"] = True
+        config["tracking"]["run_name"] = f"{study.study_name}-final"
+        report = {"study": study.study_name, "trial": best.number, "value": best.value,
+                  "parameters": best.params, **best.user_attrs}
+        for name, content in (("best_result.json", json.dumps(report, indent=2)),
+                              ("best_config.yaml", yaml.safe_dump(config, sort_keys=False))):
+            path = self.summary_dir / name
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            temporary.write_text(content + "\n", encoding="utf-8")
+            temporary.replace(path)
+
     def run(self):
         output = Path(self.config["tracking"]["output_base_dir"])
-        output.mkdir(parents=True, exist_ok=True)
+        self.summary_dir.mkdir(parents=True, exist_ok=True)
+        (self.summary_dir / "study_config.yaml").write_text(yaml.safe_dump(self.config, sort_keys=False))
         min_free = float(self.hpo.get("min_free_disk_gb", 0))
         free_gb = shutil.disk_usage(output).free / (1024 ** 3)
         if free_gb < min_free:
@@ -206,21 +247,31 @@ class HPOTrainingScript:
                 n_jobs=1,
                 catch=(RecoverableTrialError,),
                 gc_after_trial=True,
+                callbacks=[self._save_best],
             )
 
         completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
         logger.info("Study complete state counts: %s", {s.name: sum(t.state == s for t in study.trials)
                                                      for s in optuna.trial.TrialState})
         if completed:
+            self._save_best(study)
             logger.info("Best trial: %s; score: %s; parameters: %s",study.best_trial.number, study.best_value, study.best_params)
         else:
-            logger.warning("No completed trials yet; check logs and storage")
+            raise RuntimeError("No completed trials yet; check logs and storage")
         return study
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=CONFIG_PATH)
+    parser.add_argument("--check-only", action="store_true", help="Validate configuration/GPU; no training")
+    args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    HPOTrainingScript(CONFIG_PATH).run()
+    experiment = HPOTrainingScript(args.config)
+    if args.check_only:
+        logger.info("Configuration and GPU validated: %s", args.config)
+        return
+    experiment.run()
 
 
 if __name__ == "__main__":
