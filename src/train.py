@@ -51,6 +51,8 @@ class TrainingTranslationScript:
         print("CUDA Available:", torch.cuda.is_available())
         logging.info(f"Config YAML file parsing from {config_path}")
         self.config = load_training_configuration(config_path)
+        # Setup paths and reproducibility
+        self.output_base_dir = self.setup_reproducibility()
 
         wandb.login(key=os.environ["WANDB_API_KEY"])
         self.token = os.getenv("HF_TOKEN")
@@ -64,12 +66,10 @@ class TrainingTranslationScript:
         self.max_length = self.config["data"]["max_length"]
         self.src_lang = self.config["model"]["src_lang"]
         self.tgt_lang = self.config["model"]["tgt_lang"]
-        self.model, self.tokenizer = self._load_model_and_tokenizer()
 
+        self.model, self.tokenizer = self._load_model_and_tokenizer()
         # Load metrics
         self.sacrebleu, self.chrf, self.meteor, self.ter = self.load_metrics()
-        # Setup paths and reproducibility
-        self.output_base_dir = self.setup_reproducibility()
 
     def load_metrics(self):
         # Metrics
@@ -112,15 +112,16 @@ class TrainingTranslationScript:
         model = AutoModelForSeq2SeqLM.from_pretrained(model_id, token=self.token)
         return self._prepare_languages(model, tokenizer)
 
+
     def _prepare_languages(self, model, tokenizer):
         """Register the source token, select languages and configure generation.
 
-        Mutates and returns the supplied model and tokenizer. Embeddings are
-        resized only when tokens are added. The target token must already exist.
+            Mutates and returns the supplied model and tokenizer. Embeddings are
+            resized only when tokens are added. The target token must already exist.
 
-        Raises:
-            ValueError: The target language token is missing from the vocabulary.
-        """
+            Raises:
+                ValueError: The target language token is missing from the vocabulary.
+            """
         num_added = tokenizer.add_special_tokens(
             {"additional_special_tokens": [self.src_lang]},
             replace_extra_special_tokens=False,
@@ -129,19 +130,9 @@ class TrainingTranslationScript:
         if num_added > 0:
             model.resize_token_embeddings(len(tokenizer))
 
-        token_id = tokenizer.convert_tokens_to_ids(self.src_lang)
-
-        if hasattr(tokenizer, "lang_code_to_id"):
-            tokenizer.lang_code_to_id[self.src_lang] = token_id
-        if hasattr(tokenizer, "id_to_lang_code"):
-            tokenizer.id_to_lang_code[token_id] = self.src_lang
-        target_id = tokenizer.convert_tokens_to_ids(self.tgt_lang)
-        if target_id is None or target_id == tokenizer.unk_token_id:
-            raise ValueError(f"Unknown target language code: {self.tgt_lang}")
-
         tokenizer.src_lang = self.src_lang
         tokenizer.tgt_lang = self.tgt_lang
-        model.generation_config.forced_bos_token_id = target_id
+
         if self.config["training_arguments"]["gradient_checkpointing"]:
             model.config.use_cache = False
         return model, tokenizer
@@ -271,7 +262,7 @@ class TrainingTranslationScript:
         model_dir = str(self.tracking.path / 'model')
         trainer.save_model(model_dir)
         self.tokenizer.save_pretrained(model_dir)
-        self.chcek_push_to_hub()
+        self.check_push_to_hub()
 
 
     def check_push_to_hub(self):
