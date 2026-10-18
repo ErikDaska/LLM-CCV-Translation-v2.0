@@ -40,8 +40,7 @@ from sacrebleu.metrics import BLEU, CHRF, TER
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 LOG = logging.getLogger("translation_evaluation")
-CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "evaluation.yaml"
-
+CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "evaluation" / "baseline_nllb.yaml"
 
 def load_evaluation_configuration(path: Path) -> dict[str, Any]:
     """Load a small evaluation-only YAML, in the style of train.py."""
