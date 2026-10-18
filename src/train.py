@@ -41,7 +41,7 @@ logging.basicConfig(level=logging.INFO)
 
 class TrainingTranslationScript:
     """Prepare translation resources and dispatch manual training or HPO."""
-    def __init__(self, config_path=None, *, config=None):
+    def __init__(self, config_path=None, *, config=None, optuna_trial=None):
         """Load YAML settings, authenticate, and initialize data, model and metrics.
 
         Args:
@@ -58,6 +58,8 @@ class TrainingTranslationScript:
             self.config = deepcopy(config)
         else:
             self.config = load_training_configuration(config_path)
+        # Trial is passed separately so it is not serialized to W&B/YAML.
+        self.optuna_trial = optuna_trial
         # Setup paths and reproducibility
         self.output_base_dir = self.setup_reproducibility()
 
@@ -68,7 +70,7 @@ class TrainingTranslationScript:
 
 
         logging.info(f'Dataset Loading {self.config["data"]["dataset"]}')
-        self.dataset = load_dataset(self.config["data"]["dataset"])
+        self.dataset = load_dataset(self.config["data"]["dataset"], token=self.token)
 
         self.max_length = self.config["data"]["max_length"]
         self.src_lang = self.config["model"]["src_lang"]
@@ -99,7 +101,8 @@ class TrainingTranslationScript:
 
     def _load_model_and_tokenizer(self):
         model_id = self.config["model"]["model_name"]
-        model_config = AutoConfig.from_pretrained( model_id, token=self.token)
+        model_revision = self.config["model"]
+        model_config = AutoConfig.from_pretrained(model_id,token=self.token)
         tokenizer_kwargs = {}
 
         if model_config.model_type == "mbart":
@@ -107,9 +110,10 @@ class TrainingTranslationScript:
         elif model_config.model_type == "m2m_100":
             tokenizer_kwargs["src_lang"] = "en"
 
-        tokenizer = AutoTokenizer.from_pretrained( model_id, token=self.token,  **tokenizer_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(model_id, token=self.token, **tokenizer_kwargs)
 
-        model = AutoModelForSeq2SeqLM.from_pretrained( model_id, token=self.token)
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_id, token=self.token
+)
         return self._prepare_languages(model, tokenizer)
 
     def _prepare_languages(self, model, tokenizer):
@@ -197,7 +201,11 @@ class TrainingTranslationScript:
         decoded_preds = self.tokenizer.batch_decode( preds, skip_special_tokens=True)
         decoded_preds = [pred.strip() for pred in decoded_preds]
         # Referências originais, sem tokenização nem truncagem.
-        decoded_labels = [[text.strip()] for text in references]
+        decoded_labels = [
+            [ref.strip() for ref in item] if isinstance(item, (tuple, list))
+            else [item.strip()]
+            for item in references
+        ]
 
         if len(decoded_preds) != len(decoded_labels):
             raise ValueError(f"Número de previsões ({len(decoded_preds)}) diferente do número de referências ({len(decoded_labels)}).")
@@ -205,7 +213,12 @@ class TrainingTranslationScript:
         # A partir daqui, mantém as chamadas às métricas e o return atuais.
         sacrebleu_result = self.sacrebleu.compute(predictions=decoded_preds, references=decoded_labels)
         chrf_result = self.chrf.compute(predictions=decoded_preds, references=decoded_labels)
-        meteor_results = self.meteor.compute(predictions=decoded_preds, references=decoded_labels)
+        # METEOR here is single-reference; report it using the first reference,
+        # but optimize HPO on multi-reference chrF instead.
+        meteor_results = self.meteor.compute(
+            predictions=decoded_preds,
+            references=[refs[0] for refs in decoded_labels],
+        )
         ter_result = self.ter.compute(predictions=decoded_preds, references=decoded_labels)
 
         return {
@@ -241,6 +254,8 @@ class TrainingTranslationScript:
             config=self.config,
         )
         self.tracking.write('wandb.json', {'id': run.id, 'url': run.url})
+        if self.optuna_trial is not None:
+            run.summary['hpo/trial_number'] = self.optuna_trial.number
 
         output_dir = str(self.tracking.path / 'checkpoints')
         os.makedirs(output_dir, exist_ok=True)
@@ -261,12 +276,31 @@ class TrainingTranslationScript:
                 raise ValueError('Early stopping requires load_best_model_at_end: true.')
             callbacks.append(EarlyStoppingCallback(early_stopping_patience=patience))
 
-        validation_compute_metrics = partial(self.compute_metrics, references=tuple(self.dataset["validation"]["translation"]))
+        if self.optuna_trial is not None:
+            from utils.optuna_pruning import OptunaPruningCallback
+
+            callbacks.append(OptunaPruningCallback(
+                self.optuna_trial,
+                metric_name=self.config["hpo"]["objective"],
+            ))
+
+        validation_dataset = tokenized_datasets["validation"]
+        if self.config["data"].get("multi_reference_validation", False):
+            from utils.validation_refs import build_multireference_view
+
+            positions, references = build_multireference_view(self.dataset["validation"])
+            validation_dataset = validation_dataset.select(positions)
+            logging.info("Validation: %d pairs grouped into %d unique sources",
+                         len(self.dataset["validation"]), len(positions))
+        else:
+            references = tuple(self.dataset["validation"]["translation"])
+
+        validation_compute_metrics = partial(self.compute_metrics, references=references)
         trainer = Seq2SeqTrainer(
             model=self.model,
             args=args,
             train_dataset=tokenized_datasets["train"],
-            eval_dataset=tokenized_datasets["validation"],
+            eval_dataset=validation_dataset,
             data_collator=data_collator,
             processing_class=self.tokenizer,
             compute_metrics=validation_compute_metrics,
@@ -285,16 +319,23 @@ class TrainingTranslationScript:
         validation_metrics = trainer.evaluate()
         self.tracking.write('metrics.json', {'train': train_result.metrics,
                                             'validation': validation_metrics})
+        if self.optuna_trial is not None and wandb.run is not None:
+            wandb.run.summary['hpo/trial_state'] = 'COMPLETE'
+            wandb.run.summary['hpo/objective_value'] = validation_metrics.get(
+                self.config['hpo']['objective'])
 
         # This puts back to the default being en_XX, otherwise when loading the model it will give an error
         if self.model.config.model_type == "mbart":
             self.tokenizer.src_lang = "en_XX"
 
-        logging.info("Saving model locally...")
-        model_dir = str(self.tracking.path / 'model')
-        trainer.save_model(model_dir)
-        self.tokenizer.save_pretrained(model_dir)
-        self.check_push_to_hub()
+        if self.config.get("save_final_model", True):
+            logging.info("Saving final model locally...")
+            model_dir = str(self.tracking.path / 'model')
+            trainer.save_model(model_dir)
+            self.tokenizer.save_pretrained(model_dir)
+            self.check_push_to_hub()
+        else:
+            logging.info("Skipping final model export for HPO trial")
         return {
             "validation_metrics": validation_metrics,
             "best_checkpoint": trainer.state.best_model_checkpoint,
@@ -303,8 +344,9 @@ class TrainingTranslationScript:
 
     def check_push_to_hub(self):
         hub = self.config["hub"]
-        if not hub:
-            print("No hub information set in config file. Skipping it...")
+        if not hub or not hub.get("push_to_hub", False):
+            logging.info("Skipping Hugging Face Hub upload")
+            return
         if hub["push_to_hub"]:
             hub_repo_id = hub["hub_repo_id"]
             if not hub_repo_id:
@@ -332,7 +374,17 @@ class TrainingTranslationScript:
             exit_code = 0
             return result
         except BaseException as error:
-            self.tracking.fail(error)
+            if self.optuna_trial is not None:
+                from optuna import TrialPruned
+                if isinstance(error, TrialPruned):
+                    self.tracking.status("pruned")
+                    if wandb.run is not None:
+                        wandb.run.summary["hpo/trial_state"] = "PRUNED"
+                    exit_code = 0  # Pruned is a controlled result, not a failed W&B run
+                else:
+                    self.tracking.fail(error)
+            else:
+                self.tracking.fail(error)
             callback = getattr(self, 'trial_tracking', None)
             if callback is not None and callback.trial is not None:
                 callback.trial.fail(error)
@@ -352,6 +404,6 @@ if __name__ == "__main__":
     from pathlib import Path
 
     parser = argparse.ArgumentParser(description="Train a translation model or run HPO.")
-    parser.add_argument('--config', default=str(Path(__file__).parent / 'configs/config.yaml'))
+    parser.add_argument('--config', default=str(Path(__file__).parent / 'configs/smoke/manual.yaml'))
     script = TrainingTranslationScript(config_path=parser.parse_args().config)
     result = script.run()
