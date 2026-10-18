@@ -69,7 +69,7 @@ class TrainingTranslationScript:
         # Load metrics
         self.sacrebleu, self.chrf, self.meteor, self.ter = self.load_metrics()
         # Setup paths and reproducibility
-        self.output_base_dir = self.setup_tracking_and_reproducibility()
+        self.output_base_dir = self.setup_reproducibility()
 
     def load_metrics(self):
         # Metrics
@@ -79,8 +79,8 @@ class TrainingTranslationScript:
         ter = evaluate.load("ter")
         return sacrebleu, chrf, meteor, ter
 
-    def setup_tracking_and_reproducibility(self):
-        training = self.config['training']
+    def setup_reproducibility(self):
+        training = self.config['training_arguments']
         if training['full_determinism']:
             enable_full_determinism(training['seed'])
         else:
@@ -142,7 +142,7 @@ class TrainingTranslationScript:
         tokenizer.src_lang = self.src_lang
         tokenizer.tgt_lang = self.tgt_lang
         model.generation_config.forced_bos_token_id = target_id
-        if self.config["training"]["gradient_checkpointing"]:
+        if self.config["training_arguments"]["gradient_checkpointing"]:
             model.config.use_cache = False
         return model, tokenizer
 
@@ -193,7 +193,7 @@ class TrainingTranslationScript:
 
     def _configured_training_kwargs(self):
         """Return the single YAML source of effective Trainer settings."""
-        return dict(self.config['training'])
+        return dict(self.config['training_arguments'])
 
     def manual_training(self, tokenized_datasets, data_collator):
         """Train, evaluate the selected checkpoint, export and optionally publish.
@@ -274,7 +274,7 @@ class TrainingTranslationScript:
         self.chcek_push_to_hub()
 
 
-    def chcek_push_to_hub(self):
+    def check_push_to_hub(self):
         hub = self.config["hub"]
         if not hub:
             print("No hub information set in config file. Skipping it...")
