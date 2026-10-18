@@ -9,7 +9,7 @@ from uuid import uuid4
 
 class RunTracking:
     """Manage a unique run directory and JSON records for a single writer."""
-    def __init__(self, base_dir, mode):
+    def __init__(self, base_dir):
         """Create a timestamp/UUID directory under base_dir with running status.
 
         Args:
@@ -20,7 +20,6 @@ class RunTracking:
         self.run_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid4().hex
         self.path = Path(base_dir) / self.run_id
         self.path.mkdir(parents=True, exist_ok=False)
-        self.mode = mode
         self.status('running')
 
     def write(self, name, data):
@@ -41,7 +40,7 @@ class RunTracking:
     def status(self, state, **details):
         """Replace status.json with the state, UTC timestamps and optional details."""
         self.write('status.json', {
-            'run_id': self.run_id, 'mode': self.mode, 'state': state,
+            'run_id': self.run_id, 'state': state,
             'started_at': self.started_at,
             'updated_at': datetime.now(timezone.utc).isoformat(), **details,
         })
