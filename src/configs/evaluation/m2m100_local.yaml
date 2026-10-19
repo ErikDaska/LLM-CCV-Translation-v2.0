@@ -1,0 +1,33 @@
+# Run on the datacenter, where this checkpoint and its training record exist.
+# Change model_id to evaluate another checkpoint. Relative paths use the shell cwd.
+model:
+  source: local
+  model_id: /home/criolo/storage/models_outputs/translation_models/hpo/m2m100-st/20261019T064321Z-b359f7fb71674dc2a9f266a7b5f11c6e/checkpoints/checkpoint-3360
+  revision: null
+  # Reads model.src_lang/tgt_lang from RUN/config.json, not tokenizer defaults.
+  # If the training record was moved, replace 'auto' with the exact training codes.
+  src_lang: auto
+  tgt_lang: auto
+
+data:
+  dataset_id: Iscte-Sintra/Korpora_paralela_st_clean
+  # Set to the dataset_revision recorded in the baseline metrics.json.
+  revision: null
+  split: test
+  source_column: original_sentence
+  target_column: translation
+
+# Same evaluation settings as baseline_nllb.yaml.
+generation:
+  batch_size: 16
+  max_input_length: 128
+  max_new_tokens: 128
+  num_beams: 4
+
+tracking:
+  project: Translation Models
+  entity: null
+  group: final_evaluation
+  run_name: m2m100-st-seed42-test
+  preview_rows: 100
+  log_predictions_artifact: true

@@ -1,10 +1,11 @@
-"""Evaluate a published KEA <-> PT translation model and track results in W&B.
+"""Evaluate a local or Hugging Face KEA <-> PT model and track results in W&B.
 
-Models/tokenizers and evaluation data are loaded by Hugging Face repository ID.
-Only evaluation settings are read from configs/evaluation.yaml; no training
-checkpoint directories, local run paths, or command-line arguments are used.
+model.model_id accepts a Hub repository ID or a local checkpoint/model directory.
+For local models, src_lang/tgt_lang may be 'auto' to read the training run's
+config.json. Test data is still loaded from a pinned Hugging Face revision.
 
-Run: python evaluate_translation.py
+Run: python src/evaluate_models.py --config src/configs/evaluation/m2m100_local.yaml
+Without --config, the existing NLLB baseline configuration is used.
 
 Requires: transformers, datasets, huggingface_hub, torch, sacrebleu,
           wandb, python-dotenv, pyyaml, sentencepiece (for some tokenizers).
@@ -12,6 +13,7 @@ Requires: transformers, datasets, huggingface_hub, torch, sacrebleu,
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
@@ -77,6 +79,9 @@ def load_evaluation_configuration(path: Path) -> dict[str, Any]:
         if revision is not None and (not isinstance(revision, str) or not revision.strip()):
             raise ValueError(f"{section}.revision must be null or a revision string")
 
+    if config["model"].get("source", "auto") not in ("auto", "local", "hub"):
+        raise ValueError("model.source must be auto, local, or hub")
+
     for key in required["generation"]:
         value = config["generation"][key]
         if type(value) is not int or value < 1:
@@ -98,6 +103,79 @@ def load_evaluation_configuration(path: Path) -> dict[str, Any]:
     if type(config["tracking"].get("log_predictions_artifact", True)) is not bool:
         raise ValueError("tracking.log_predictions_artifact must be boolean")
     return config
+
+
+def resolve_model_source(config: dict, api, hf_token: str | None) -> tuple[str, str, str | None, dict]:
+    """Resolve an existing local directory or pin a Hub model to its commit SHA."""
+    model_id = config["model_id"]
+    path = Path(model_id).expanduser()
+    source = config.get("source", "auto")
+    if source == "auto":
+        source = "local" if path.exists() or model_id.startswith(("/", ".", "~")) else "hub"
+
+    if source == "local":
+        if not path.is_dir():
+            raise FileNotFoundError(f"Local model directory does not exist: {path}")
+        if config.get("revision") is not None:
+            raise ValueError("model.revision applies only to Hub models; use null for local checkpoints")
+        if not (path / "config.json").is_file():
+            raise FileNotFoundError(f"Missing model config.json in {path}")
+        weights = ("model.safetensors", "model.safetensors.index.json",
+                   "pytorch_model.bin", "pytorch_model.bin.index.json")
+        if not any((path / name).is_file() for name in weights):
+            raise FileNotFoundError(f"No model weights found in {path}")
+        return str(path.resolve()), source, None, {"local_files_only": True}
+
+    if "auto" in (config["src_lang"], config["tgt_lang"]):
+        raise ValueError("Hub models require explicit src_lang/tgt_lang values")
+    sha = api.model_info(model_id, revision=config.get("revision")).sha
+    return model_id, source, sha, {"revision": sha, "token": hf_token}
+
+
+def resolve_language_codes(model_config: dict, model_id: str, source: str) -> tuple[str, str]:
+    """Read exact language IDs from a local training record, never guess tokens."""
+    src_lang, tgt_lang = model_config["src_lang"], model_config["tgt_lang"]
+    if "auto" not in (src_lang, tgt_lang):
+        return src_lang, tgt_lang
+    if source != "local":
+        raise ValueError("Automatic language IDs require a local training record")
+
+    path = Path(model_id)
+    # Trainer checkpoints: RUN/checkpoints/checkpoint-N; exports: RUN/model.
+    run_dir = path.parent.parent if path.parent.name == "checkpoints" else path.parent
+    record = run_dir / "config.json"
+    if not record.is_file():
+        raise FileNotFoundError(
+            f"Training configuration not found: {record}. Set model.src_lang and "
+            "model.tgt_lang explicitly to the values used during training."
+        )
+    with record.open(encoding="utf-8") as stream:
+        training = json.load(stream)
+    recorded_model = training.get("model", {}) if isinstance(training, dict) else {}
+    if not isinstance(recorded_model, dict):
+        raise ValueError(f"Expected a model mapping in training configuration: {record}")
+    codes = []
+    for key in ("src_lang", "tgt_lang"):
+        value = model_config[key]
+        if value == "auto":
+            value = recorded_model.get(key)
+        if not isinstance(value, str) or not value.strip() or value == "auto":
+            raise ValueError(f"No valid model.{key} in {record}; set it explicitly in the evaluation YAML")
+        codes.append(value)
+    LOG.info("Restored language IDs from %s: %s -> %s", record, *codes)
+    return tuple(codes)
+
+
+def load_evaluation_model(model_id: str, load_kwargs: dict, src_lang: str, tgt_lang: str):
+    """Load saved weights/tokens without adding tokens or resizing embeddings."""
+    # Custom language maps are not always serialized. Let each tokenizer start
+    # with its native default, then restore mappings before setting custom codes.
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_id, src_lang=None, tgt_lang=None, **load_kwargs
+    )
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_id, **load_kwargs)
+    target_id = configure_languages(model, tokenizer, src_lang, tgt_lang)
+    return model, tokenizer, target_id
 
 
 def normalized_key(text: str) -> str:
@@ -148,7 +226,7 @@ def group_test_references(
 
 
 def _get_token_id(tokenizer, token: str) -> int:
-    """Return a published language-token ID; never create tokens at evaluation."""
+    """Return a saved language-token ID; never create tokens at evaluation."""
     if hasattr(tokenizer, "lang_code_to_id") and token in tokenizer.lang_code_to_id:
         token_id = tokenizer.lang_code_to_id[token]
     else:
@@ -157,7 +235,7 @@ def _get_token_id(tokenizer, token: str) -> int:
     if token_id is None or token_id == tokenizer.unk_token_id:
         raise ValueError(
             f"Unknown language token {token!r}. Set src_lang/tgt_lang to exactly "
-            "the codes used during training and publish the fine-tuned tokenizer "
+            "the codes used during training and save the fine-tuned tokenizer "
             "together with the model."
         )
     return int(token_id)
@@ -200,7 +278,7 @@ def configure_languages(model, tokenizer, src_lang: str, tgt_lang: str) -> int:
     except (ValueError, KeyError) as exc:
         raise ValueError(
             f"Unable to configure tokenizer for {src_lang} -> {tgt_lang}. "
-            "Check the actual tokenizer class and language IDs in the Hub repo."
+            "Check the tokenizer and language IDs saved with the model."
         ) from exc
 
     source_id = _get_token_id(tokenizer, src_lang)
@@ -208,7 +286,7 @@ def configure_languages(model, tokenizer, src_lang: str, tgt_lang: str) -> int:
     if max(source_id, target_id) >= vocab_size:
         raise ValueError(
             "Language token ID is larger than the model's embedding matrix. "
-            "The published tokenizer/model are incompatible (perhaps token "
+            "The saved tokenizer/model are incompatible (perhaps token "
             "embeddings were not saved after adding a custom language)."
         )
     model.generation_config.forced_bos_token_id = target_id
@@ -289,6 +367,7 @@ def log_evaluation(
         "original_test_rows", "invalid_test_rows_excluded",
         "unique_sources_evaluated", "multi_reference_sources",
         "model_revision", "dataset_revision", "model_id", "dataset_id", "direction",
+        "model_source",
     ):
         run.summary[key] = report[key]
     run.summary["metric_signatures"] = report["metric_signatures"]
@@ -330,6 +409,7 @@ def log_evaluation(
                 metadata={
                     "model_id": report["model_id"],
                     "model_revision": report["model_revision"],
+                    "model_source": report["model_source"],
                     "dataset_id": report["dataset_id"],
                     "dataset_revision": report["dataset_revision"],
                     "direction": report["direction"],
@@ -346,12 +426,16 @@ def log_evaluation(
 def evaluate_from_config(config_path: Path = CONFIG_PATH) -> dict[str, Any]:
     config = load_evaluation_configuration(config_path)
     hf_token = os.getenv("HF_TOKEN")  # optional for public repos, needed for private repos
+    api = HfApi(token=hf_token)
+    model_id, model_source, model_sha, load_kwargs = resolve_model_source(config["model"], api, hf_token)
+    src_lang, tgt_lang = resolve_language_codes(config["model"], model_id, model_source)
+    # Log the effective path and language codes, including those resolved from 'auto'.
+    config["model"].update(model_id=model_id, source=model_source,
+                           src_lang=src_lang, tgt_lang=tgt_lang)
     if os.getenv("WANDB_API_KEY"):
         wandb.login(key=os.environ["WANDB_API_KEY"])
 
     tracking = config["tracking"]
-    model_id = config["model"]["model_id"]
-    src_lang, tgt_lang = config["model"]["src_lang"], config["model"]["tgt_lang"]
     run_name = tracking.get("run_name") or f"test_{model_id.split('/')[-1]}_{src_lang}_to_{tgt_lang}"
     run = wandb.init(
         project=tracking["project"],
@@ -367,11 +451,9 @@ def evaluate_from_config(config_path: Path = CONFIG_PATH) -> dict[str, Any]:
 
     exit_code = 1
     try:
-        api = HfApi(token=hf_token)
-        model_sha = api.model_info(model_id, revision=config["model"].get("revision")).sha
         dataset_id = config["data"]["dataset_id"]
         dataset_sha = api.dataset_info(dataset_id, revision=config["data"].get("revision")).sha
-        LOG.info("Model: %s @ %s", model_id, model_sha)
+        LOG.info("Model (%s): %s @ %s", model_source, model_id, model_sha or "local checkpoint")
         LOG.info("Test dataset: %s @ %s", dataset_id, dataset_sha)
 
         test = load_dataset(
@@ -390,9 +472,7 @@ def evaluate_from_config(config_path: Path = CONFIG_PATH) -> dict[str, Any]:
         LOG.info("Test: %d raw rows; %d unique sources; %d invalid pairs",
                  len(test), len(items), invalid)
 
-        tokenizer = AutoTokenizer.from_pretrained(model_id, revision=model_sha, token=hf_token)
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_id, revision=model_sha, token=hf_token)
-        target_id = configure_languages(model, tokenizer, src_lang, tgt_lang)
+        model, tokenizer, target_id = load_evaluation_model(model_id, load_kwargs, src_lang, tgt_lang)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model.to(device)
         LOG.info("Evaluation device: %s", device)
@@ -403,6 +483,9 @@ def evaluate_from_config(config_path: Path = CONFIG_PATH) -> dict[str, Any]:
             "evaluated_at_utc": datetime.now(timezone.utc).isoformat(),
             "model_id": model_id,
             "model_revision": model_sha,
+            "model_source": model_source,
+            "source_language": src_lang,
+            "target_language": tgt_lang,
             "dataset_id": dataset_id,
             "dataset_revision": dataset_sha,
             "direction": f"{src_lang}->{tgt_lang}",
@@ -430,8 +513,12 @@ def evaluate_from_config(config_path: Path = CONFIG_PATH) -> dict[str, Any]:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=CONFIG_PATH,
+                        help="Evaluation YAML (defaults to the NLLB baseline)")
+    args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    evaluate_from_config(CONFIG_PATH)
+    evaluate_from_config(args.config)
 
 
 if __name__ == "__main__":
