@@ -1,0 +1,17 @@
+# Manual mBART-51 stable run on the SV corpus, published to the Hub.
+defaults:
+  - model: mbart51
+  - data: sv
+  - training_arguments: manual_mbart51
+  - _self_
+
+early_stopping_patience: 3
+hub:
+  push_to_hub: true
+  hub_repo_id: Iscte-Sintra/mbart-51-stable-v1.0
+  hub_private: false
+tracking:
+  project: Translation Models
+  group_name: mbart_SV_manual
+  run_name: mbart_v1.0-stable
+  output_base_dir: /home/criolo/storage/models_outputs/translation_models

@@ -1,0 +1,18 @@
+# Integration smoke test, not a model-quality experiment.
+# Preprocessing and evaluation still use the full dataset.
+defaults:
+  - model: mbart
+  - data: sv
+  - training_arguments: smoke
+  - _self_
+
+early_stopping_patience: null
+hub:
+  push_to_hub: false
+  hub_repo_id: null
+  hub_private: true
+tracking:
+  project: Translation Models
+  group_name: mbart50-smoke
+  run_name: mbart-manual-smoke
+  output_base_dir: /home/criolo/storage/models_outputs/translation_models/smoke/manual

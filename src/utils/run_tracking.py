@@ -13,8 +13,7 @@ class RunTracking:
         """Create a timestamp/UUID directory under base_dir with running status.
 
         Args:
-            base_dir: Parent directory for experiment or trial records.
-            mode: Execution label, such as manual, hpo or hpo_trial.
+            base_dir: Parent directory for experiment records.
         """
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.run_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid4().hex

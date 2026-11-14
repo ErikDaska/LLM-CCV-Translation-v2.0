@@ -1,0 +1,3 @@
+model_name: facebook/mbart-large-50
+src_lang: kea_sv_XX
+tgt_lang: pt_XX

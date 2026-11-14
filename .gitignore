@@ -1,3 +1,8 @@
 venv/*
 .env
 /src/cleaning_reports/
+outputs/
+multirun/
+__pycache__/
+*.pyc
+.idea/

@@ -1,5 +1,6 @@
 datasets==5.0.0
 transformers==5.14.1
+hydra-core==1.3.8
 tiktoken==0.13.0
 sentencepiece==0.2.2
 protobuf>=4.21.0

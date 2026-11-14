@@ -1,0 +1,4 @@
+model_name: facebook/nllb-200-distilled-600M
+# Custom source token registered by the training script.
+src_lang: kea_sv_XX
+tgt_lang: por_Latn

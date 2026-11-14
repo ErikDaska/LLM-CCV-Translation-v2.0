@@ -1,0 +1,33 @@
+# Selected values from a previous HPO run, reused for the manual export.
+num_train_epochs: 4
+per_device_train_batch_size: 32
+per_device_eval_batch_size: 8
+gradient_accumulation_steps: 1
+learning_rate: 2.6108036044530897e-05
+warmup_steps: 0
+warmup_ratio: 0.12244372557366943
+weight_decay: 0.0007492285663778082
+label_smoothing_factor: 0.03609320459860353
+lr_scheduler_type: linear
+optim: adamw_torch_fused
+seed: 42
+data_seed: 42
+full_determinism: false
+max_grad_norm: 1.0
+logging_strategy: steps
+logging_steps: 10
+eval_strategy: epoch
+save_strategy: epoch
+save_total_limit: 2
+predict_with_generate: true
+generation_num_beams: 5
+load_best_model_at_end: true
+metric_for_best_model: eval_chrf
+greater_is_better: true
+logging_nan_inf_filter: true
+fp16: false
+bf16: true
+gradient_checkpointing: true
+report_to:
+  - wandb
+generation_max_length: 128

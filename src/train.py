@@ -13,14 +13,15 @@ for variable in ('HF_HOME', 'WANDB_DIR', 'TMPDIR'):
 
 from functools import partial
 import logging
-from utils.configuration import load_training_configuration
+from utils.configuration import validate_training_config
 import evaluate
+import hydra
 import numpy as np
 import torch
 import wandb
+from omegaconf import DictConfig, OmegaConf
 from utils.run_tracking import RunTracking
 from datasets import load_dataset
-from dotenv import load_dotenv
 from transformers import (
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
@@ -33,71 +34,83 @@ from transformers import (
     AutoConfig,
     M2M100Tokenizer,
 )
-from copy import deepcopy
 
-load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
 
+class TrainingRunExtension:
+    """Optional hooks for run-specific behaviour; every method is a no-op.
+
+    Extensions receive lifecycle events so the training script stays free of
+    domain concerns (experiment controllers, trackers, resumable studies).
+    """
+
+    def build_callbacks(self):
+        """Return extra callbacks to register on the Trainer."""
+        return []
+
+    def on_run_started(self, wandb_run):
+        """Called after the W&B run is open and its identity recorded."""
+
+    def on_completed(self, validation_metrics):
+        """Called after final evaluation and before the model export."""
+
+    def on_error(self, error):
+        """Return a status name for an expected outcome, or None for a failure."""
+        return None
+
+
 class TrainingTranslationScript:
-    """Prepare translation resources and dispatch manual training or HPO."""
-    def __init__(self, config_path=None, *, config=None, optuna_trial=None):
-        """Load YAML settings, authenticate, and initialize data, model and metrics.
+    """Prepare translation resources and run manual training."""
+
+    def __init__(self, config, *, extension=None):
+        """Initialize data, model and metrics from a training configuration.
 
         Args:
-            config_path: YAML path resolved relative to the working directory.
+            config: Settings mapping validated by ``validate_training_config``.
+            extension: Optional ``TrainingRunExtension`` with run-specific
+                callbacks and lifecycle hooks; defaults to a no-op.
 
         Requires WANDB_API_KEY and HF_TOKEN in the environment. Resource loading
         happens here, before the tracked execution starts in ``run()``.
         """
-        print("CUDA Available:", torch.cuda.is_available())
-        if (config_path is None) == (config is None):
-            raise ValueError("Fornece config_path ou config, exclusivamente.")
+        logging.info("CUDA Available: %s", torch.cuda.is_available())
+        validate_training_config(config)
+        self.config = config
+        self.extension = extension if extension is not None else TrainingRunExtension()
 
-        if config is not None:
-            self.config = deepcopy(config)
-        else:
-            self.config = load_training_configuration(config_path)
-        # Trial is passed separately so it is not serialized to W&B/YAML.
-        self.optuna_trial = optuna_trial
-        # Setup paths and reproducibility
-        self.output_base_dir = self.setup_reproducibility()
-
-        wandb.login(key=os.environ["WANDB_API_KEY"])
-        self.token = os.getenv("HF_TOKEN")
-        if not self.token:
-            raise EnvironmentError("HF_TOKEN is not set in environment or .env file.")
-
-
-        logging.info(f'Dataset Loading {self.config["data"]["dataset"]}')
-        self.dataset = load_dataset(self.config["data"]["dataset"], token=self.token)
-
-        self.max_length = self.config["data"]["max_length"]
-        self.src_lang = self.config["model"]["src_lang"]
-        self.tgt_lang = self.config["model"]["tgt_lang"]
-
+        self._setup_reproducibility()
+        self._authenticate()
+        self._load_dataset()
         self.model, self.tokenizer = self._load_model_and_tokenizer()
-        # Load metrics
-        self.sacrebleu, self.chrf, self.meteor, self.ter = self.load_metrics()
+        self._load_metrics()
 
-    def load_metrics(self):
-        # Metrics
-        sacrebleu = evaluate.load("sacrebleu")
-        chrf = evaluate.load("chrf")
-        meteor = evaluate.load("meteor")
-        ter = evaluate.load("ter")
-        return sacrebleu, chrf, meteor, ter
-
-    def setup_reproducibility(self):
+    def _setup_reproducibility(self):
+        """Seed the process and resolve the run storage base directory."""
         training = self.config['training_arguments']
         if training['full_determinism']:
             enable_full_determinism(training['seed'])
         else:
             set_seed(training['seed'])
 
-        # Resolve storage directory safely
         raw_output_dir = self.config["tracking"]["output_base_dir"]
-        return os.path.abspath(raw_output_dir)
+        self.output_base_dir = os.path.abspath(raw_output_dir)
+
+    def _authenticate(self):
+        """Log in to W&B and require an HF token before any network call."""
+        wandb.login(key=os.environ["WANDB_API_KEY"])
+        self.token = os.getenv("HF_TOKEN")
+        if not self.token:
+            raise EnvironmentError("HF_TOKEN is not set in environment or .env file.")
+
+    def _load_dataset(self):
+        """Load the parallel corpus and cache the language/max length settings."""
+        logging.info('Dataset Loading %s', self.config["data"]["dataset"])
+        self.dataset = load_dataset(self.config["data"]["dataset"], token=self.token)
+
+        self.max_length = self.config["data"]["max_length"]
+        self.src_lang = self.config["model"]["src_lang"]
+        self.tgt_lang = self.config["model"]["tgt_lang"]
 
     def _load_model_and_tokenizer(self):
         model_id = self.config["model"]["model_name"]
@@ -111,8 +124,7 @@ class TrainingTranslationScript:
 
         tokenizer = AutoTokenizer.from_pretrained(model_id, token=self.token, **tokenizer_kwargs)
 
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_id, token=self.token
-)
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_id, token=self.token)
         return self._prepare_languages(model, tokenizer)
 
     def _prepare_languages(self, model, tokenizer):
@@ -168,6 +180,12 @@ class TrainingTranslationScript:
 
         return model, tokenizer
 
+    def _load_metrics(self):
+        self.sacrebleu = evaluate.load("sacrebleu")
+        self.chrf = evaluate.load("chrf")
+        self.meteor = evaluate.load("meteor")
+        self.ter = evaluate.load("ter")
+
     def preprocess_function(self, examples):
         """Tokenize a batch of original_sentence/translation pairs with truncation."""
         self.tokenizer.src_lang = self.src_lang
@@ -212,8 +230,7 @@ class TrainingTranslationScript:
         # A partir daqui, mantém as chamadas às métricas e o return atuais.
         sacrebleu_result = self.sacrebleu.compute(predictions=decoded_preds, references=decoded_labels)
         chrf_result = self.chrf.compute(predictions=decoded_preds, references=decoded_labels)
-        # METEOR here is single-reference; report it using the first reference,
-        # but optimize HPO on multi-reference chrF instead.
+        # METEOR is single-reference; report it on the first reference only.
         meteor_results = self.meteor.compute(
             predictions=decoded_preds,
             references=[refs[0] for refs in decoded_labels],
@@ -231,18 +248,16 @@ class TrainingTranslationScript:
         """Return the single YAML source of effective Trainer settings."""
         return dict(self.config['training_arguments'])
 
-    def manual_training(self, tokenized_datasets, data_collator):
-        """Train, evaluate the selected checkpoint, export and optionally publish.
-
-        Requires tracking initialized by ``run()`` and train/validation splits.
-        Writes arguments, metrics, history, checkpoint selection and W&B identity
-        to the run directory. ``run()`` handles failures and closes W&B.
-        """
-        logging.info("Initializing W&B...")
+    def _resolve_run_name(self):
+        """Derive the W&B run name, falling back to a model-based default."""
         model_name_clean = self.config["model"]["model_name"].split("/")[-1]
         tracking_parameters = self.config["tracking"]
-        run_name = tracking_parameters.get("run_name", f"cpt_{model_name_clean}")
+        return tracking_parameters.get("run_name", f"cpt_{model_name_clean}")
 
+    def _start_wandb_run(self, run_name):
+        """Open the tracked W&B run and record its identity on disk."""
+        logging.info("Initializing W&B...")
+        tracking_parameters = self.config["tracking"]
         run = wandb.init(
             id=self.tracking.run_id,
             dir=str(self.tracking.path),
@@ -253,37 +268,33 @@ class TrainingTranslationScript:
             config=self.config,
         )
         self.tracking.write('wandb.json', {'id': run.id, 'url': run.url})
-        if self.optuna_trial is not None:
-            run.summary['hpo/trial_number'] = self.optuna_trial.number
+        self.extension.on_run_started(run)
+        return run
 
-        output_dir = str(self.tracking.path / 'checkpoints')
-        os.makedirs(output_dir, exist_ok=True)
-
-        logging.info(f"Model output directory: {output_dir}")
-
-        # Build the effective arguments separately from the requested YAML config.
+    def _build_training_arguments(self, output_dir, run_name):
+        """Build Seq2SeqTrainingArguments from the YAML settings and persist them."""
         training_kwargs = self._configured_training_kwargs()
         training_kwargs.update(output_dir=output_dir, run_name=run_name)
 
         args = Seq2SeqTrainingArguments(**training_kwargs)
         self.tracking.write('training_args.json', args.to_dict())
+        return args
 
+    def _build_callbacks(self, args):
+        """Assemble early stopping plus any extension-provided callbacks."""
         callbacks = []
-        patience = self.config["early_stopping_patience"]
+        patience = self.config.get("early_stopping_patience")
         if patience:
             if not args.load_best_model_at_end:
                 raise ValueError('Early stopping requires load_best_model_at_end: true.')
             callbacks.append(EarlyStoppingCallback(early_stopping_patience=patience))
 
-        if self.optuna_trial is not None:
-            from utils.optuna_pruning import OptunaPruningCallback
+        callbacks.extend(self.extension.build_callbacks())
+        return callbacks
 
-            callbacks.append(OptunaPruningCallback(
-                self.optuna_trial,
-                metric_name=self.config["hpo"]["objective"],
-            ))
-
-        validation_dataset = tokenized_datasets["validation"]
+    def _build_validation_view(self, tokenized_validation):
+        """Return the eval split and its references (optionally multi-reference)."""
+        validation_dataset = tokenized_validation
         if self.config["data"].get("multi_reference_validation", False):
             from utils.validation_refs import build_multireference_view
 
@@ -293,9 +304,13 @@ class TrainingTranslationScript:
                          len(self.dataset["validation"]), len(positions))
         else:
             references = tuple(self.dataset["validation"]["translation"])
+        return validation_dataset, references
 
+    def _build_trainer(self, tokenized_datasets, validation_dataset, references,
+                       data_collator, args, callbacks):
+        """Create the Seq2SeqTrainer bound to the validation metrics."""
         validation_compute_metrics = partial(self.compute_metrics, references=references)
-        trainer = Seq2SeqTrainer(
+        return Seq2SeqTrainer(
             model=self.model,
             args=args,
             train_dataset=tokenized_datasets["train"],
@@ -306,23 +321,27 @@ class TrainingTranslationScript:
             callbacks=callbacks,
         )
 
+    def _train_and_evaluate(self, trainer):
+        """Run the training loop, then evaluate the restored best checkpoint."""
         train_result = trainer.train()
-        self.tracking.write('metrics.json', {'train': train_result.metrics})
+        # The Trainer restored the best checkpoint; evaluate that model explicitly.
+        validation_metrics = trainer.evaluate()
+        return train_result, validation_metrics
+
+    def _record_results(self, trainer, args, train_result, validation_metrics):
+        """Write metrics, history and checkpoint selection to the run directory."""
+        self.tracking.write('metrics.json', {'train': train_result.metrics,
+                                             'validation': validation_metrics})
         self.tracking.write('history.json', trainer.state.log_history)
         self.tracking.write('selection.json', {
             'best_checkpoint': trainer.state.best_model_checkpoint,
             'best_metric': trainer.state.best_metric,
             'metric_for_best_model': args.metric_for_best_model,
         })
-        # The Trainer restored the best checkpoint; evaluate that model explicitly.
-        validation_metrics = trainer.evaluate()
-        self.tracking.write('metrics.json', {'train': train_result.metrics,
-                                            'validation': validation_metrics})
-        if self.optuna_trial is not None and wandb.run is not None:
-            wandb.run.summary['hpo/trial_state'] = 'COMPLETE'
-            wandb.run.summary['hpo/objective_value'] = validation_metrics.get(
-                self.config['hpo']['objective'])
+        self.extension.on_completed(validation_metrics)
 
+    def _export_final_model(self, trainer):
+        """Reset mBART source language, save locally and optionally publish."""
         # This puts back to the default being en_XX, otherwise when loading the model it will give an error
         if self.model.config.model_type == "mbart":
             self.tokenizer.src_lang = "en_XX"
@@ -334,7 +353,33 @@ class TrainingTranslationScript:
             self.tokenizer.save_pretrained(model_dir)
             self.check_push_to_hub()
         else:
-            logging.info("Skipping final model export for HPO trial")
+            logging.info("Skipping final model export (save_final_model is false)")
+
+    def manual_training(self, tokenized_datasets, data_collator):
+        """Train, evaluate the selected checkpoint, export and optionally publish.
+
+        Requires tracking initialized by ``run()`` and train/validation splits.
+        Writes arguments, metrics, history, checkpoint selection and W&B identity
+        to the run directory. ``run()`` handles failures and closes W&B.
+        """
+        run_name = self._resolve_run_name()
+        self._start_wandb_run(run_name)
+
+        output_dir = str(self.tracking.path / 'checkpoints')
+        os.makedirs(output_dir, exist_ok=True)
+        logging.info("Model output directory: %s", output_dir)
+
+        args = self._build_training_arguments(output_dir, run_name)
+        callbacks = self._build_callbacks(args)
+        validation_dataset, references = self._build_validation_view(
+            tokenized_datasets["validation"])
+        trainer = self._build_trainer(tokenized_datasets, validation_dataset, references,
+                                      data_collator, args, callbacks)
+
+        train_result, validation_metrics = self._train_and_evaluate(trainer)
+        self._record_results(trainer, args, train_result, validation_metrics)
+        self._export_final_model(trainer)
+
         return {
             "validation_metrics": validation_metrics,
             "best_checkpoint": trainer.state.best_model_checkpoint,
@@ -342,18 +387,18 @@ class TrainingTranslationScript:
         }
 
     def check_push_to_hub(self):
-        hub = self.config["hub"]
-        if not hub or not hub.get("push_to_hub", False):
+        """Upload model and tokenizer when the config enables the Hub push."""
+        hub = self.config.get("hub") or {}
+        if not hub.get("push_to_hub", False):
             logging.info("Skipping Hugging Face Hub upload")
             return
-        if hub["push_to_hub"]:
-            hub_repo_id = hub["hub_repo_id"]
-            if not hub_repo_id:
-                raise ValueError("push_to_hub is enabled but hub_repo_id is missing in config.")
-            hub_private = hub["hub_private"]
-            logging.info(f"Pushing model to HF Hub: {hub_repo_id}")
-            self.model.push_to_hub(hub_repo_id, token=self.token, private=hub_private)
-            self.tokenizer.push_to_hub(hub_repo_id, token=self.token, private=hub_private)
+        hub_repo_id = hub.get("hub_repo_id")
+        if not hub_repo_id:
+            raise ValueError("push_to_hub is enabled but hub_repo_id is missing in config.")
+        hub_private = hub.get("hub_private", True)
+        logging.info("Pushing model to HF Hub: %s", hub_repo_id)
+        self.model.push_to_hub(hub_repo_id, token=self.token, private=hub_private)
+        self.tokenizer.push_to_hub(hub_repo_id, token=self.token, private=hub_private)
 
     def run(self):
         """Track preprocessing and training, record failures and always close W&B.
@@ -373,36 +418,35 @@ class TrainingTranslationScript:
             exit_code = 0
             return result
         except BaseException as error:
-            if self.optuna_trial is not None:
-                from optuna import TrialPruned
-                if isinstance(error, TrialPruned):
-                    self.tracking.status("pruned")
-                    if wandb.run is not None:
-                        wandb.run.summary["hpo/trial_state"] = "PRUNED"
-                    exit_code = 0  # Pruned is a controlled result, not a failed W&B run
-                else:
-                    self.tracking.fail(error)
-            else:
+            status = self.extension.on_error(error) or "failed"
+            if status == "failed":
                 self.tracking.fail(error)
-            callback = getattr(self, 'trial_tracking', None)
-            if callback is not None and callback.trial is not None:
-                callback.trial.fail(error)
+            else:
+                # Expected outcome declared by the extension, not a failed run.
+                self.tracking.status(status)
+                exit_code = 0
             raise
         finally:
             if wandb.run is not None:
                 wandb.finish(exit_code=exit_code)
 
     def _run_training(self):
-        """Tokenize dataset splits, create the collator and dispatch the chosen mode."""
+        """Tokenize dataset splits, create the collator and run training."""
         tokenized_datasets = self.dataset.map(self.preprocess_function, batched=True, remove_columns=self.dataset["train"].column_names)
         data_collator = DataCollatorForSeq2Seq(self.tokenizer, model=self.model, pad_to_multiple_of=8)
         return self.manual_training(tokenized_datasets, data_collator)
 
-if __name__ == "__main__":
-    import argparse
-    from pathlib import Path
+@hydra.main(config_path="configs/training", config_name="smoke_manual", version_base=None)
+def main(cfg: DictConfig) -> None:
+    """Compose the Hydra config and run one training run.
 
-    parser = argparse.ArgumentParser(description="Train a translation model or run HPO.")
-    parser.add_argument('--config', default=str(Path(__file__).parent / 'configs/smoke/manual.yaml'))
-    script = TrainingTranslationScript(config_path=parser.parse_args().config)
-    result = script.run()
+    Any ``key=value`` argument overrides the YAML (e.g.
+    ``training_arguments.learning_rate=3e-5``) and ``-m`` sweeps combinations;
+    each run stores the resolved config under ``outputs/.../.hydra/config.yaml``.
+    """
+    config = OmegaConf.to_container(cfg, resolve=True)
+    TrainingTranslationScript(config=config).run()
+
+
+if __name__ == "__main__":
+    main()

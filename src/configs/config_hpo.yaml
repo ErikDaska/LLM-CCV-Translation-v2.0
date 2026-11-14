@@ -1,41 +1,45 @@
 # Experiment configuration. Secrets and cache paths belong in the environment.
 model:
-  model: facebook/mbart-large-50
-  src_lang: kea_sv_XX
+  model_name: facebook/mbart-large-50
+  src_lang: kea_st_XX
   tgt_lang: pt_XX
 data:
-  dataset: Iscte-Sintra/Korpora_paralela_sv
+  dataset: Iscte-Sintra/Korpora_paralela_st_clean
   max_length: 128
 tracking:
   project: Translation Models
   group_name: m2m100_SV_HPO
   run_name: cpt_m2m100_418M
   output_base_dir: /home/criolo/storage/models_outputs/translation_models/m2m100-sv
+
+# Shared trainer settings. Each trial receives its own sampled parameters.
+early_stopping_patience: 3
 hub:
   push_to_hub: false
-  hub_repo_id: Iscte-Sintra/teste01-sv
+  hub_repo_id: null
   hub_private: true
-workflow:
-  mode: hpo
-training:
+
+training_arguments:
+  # Experiment reproducibility setup
+  full_determinism: false
+  seed: 42
+  data_seed: 42
   # Fixed settings shared by every trial.
   per_device_eval_batch_size: 64
   gradient_accumulation_steps: 1
   warmup_steps: 0
   lr_scheduler_type: linear
   optim: adamw_torch
-  seed: 42
-  data_seed: 42
-  full_determinism: false
+
   max_grad_norm: 1.0
   logging_strategy: steps
   logging_steps: 10
   eval_strategy: epoch
-  save_strategy: 'steps'
+  save_strategy: epoch
   save_total_limit: 3
   predict_with_generate: true
   generation_num_beams: 5
-  load_best_model_at_end: false
+  load_best_model_at_end: true
   metric_for_best_model: eval_chrf
   greater_is_better: true
   logging_nan_inf_filter: true
@@ -46,12 +50,15 @@ training:
   - wandb
   generation_max_length: 128
 hpo:
+  study_name: mbart_sv_hpo_v1
+  # Relative to the working directory; reuse it to reopen the same study.
+  storage: sqlite:///translation_hpo.db
   sampler_seed: 42
   objective: eval_chrf
   direction: maximize
   trials: 50
   search_space:
-    # Sampled settings must not also appear in training.
+    # Sampled settings are merged into training_arguments before model loading.
     learning_rate:
       type: float
       low: 5.0e-06

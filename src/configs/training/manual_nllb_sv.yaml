@@ -1,0 +1,17 @@
+# Manual NLLB baseline for Sao Vicente Creole to Portuguese.
+defaults:
+  - model: nllb
+  - data: sv
+  - training_arguments: manual_nllb
+  - _self_
+
+early_stopping_patience: 3
+hub:
+  push_to_hub: false
+  hub_repo_id: null
+  hub_private: true
+tracking:
+  project: Translation Models
+  group_name: nllb600M_SV_manual
+  run_name: nllb600M_sv_baseline_seed42
+  output_base_dir: /home/criolo/storage/models_outputs/translation_models/nllb600m-sv

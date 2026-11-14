@@ -1,7 +1,7 @@
 # Two trials with two optimizer updates each; not a quality comparison.
 # Preprocessing and evaluation still use the full dataset.
 model:
-  model: facebook/mbart-large-50
+  model_name: facebook/mbart-large-50
   src_lang: kea_sv_XX
   tgt_lang: pt_XX
 data:
@@ -16,9 +16,7 @@ hub:
   push_to_hub: false
   hub_repo_id: null
   hub_private: true
-workflow:
-  mode: hpo
-training:
+training_arguments:
   # Fixed settings only. max_steps overrides the epoch budget.
   max_steps: 2
   per_device_eval_batch_size: 2

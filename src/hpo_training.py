@@ -13,11 +13,12 @@ import shutil
 import yaml
 
 # train configures HF_HOME / WANDB_DIR / TMPDIR before importing heavy libraries.
-from train import TrainingTranslationScript
-from utils.configuration import load_training_configuration
+from train import TrainingRunExtension, TrainingTranslationScript
+from utils.configuration import load_training_configuration, validate_training_config
 
 import optuna
 import torch
+import wandb
 
 CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "hpo" / "hpo_mbart_st.yaml"
 logger = logging.getLogger(__name__)
@@ -27,9 +28,38 @@ class RecoverableTrialError(RuntimeError):
     """GPU out-of-memory: mark this trial failed and continue the study."""
 
 
+class OptunaRunExtension(TrainingRunExtension):
+    """Wire one Optuna trial into the training script's lifecycle hooks."""
+
+    def __init__(self, trial, objective):
+        self.trial = trial
+        self.objective = objective
+
+    def build_callbacks(self):
+        from utils.optuna_pruning import OptunaPruningCallback
+
+        return [OptunaPruningCallback(self.trial, metric_name=self.objective)]
+
+    def on_run_started(self, wandb_run):
+        wandb_run.summary["hpo/trial_number"] = self.trial.number
+
+    def on_completed(self, validation_metrics):
+        if wandb.run is not None:
+            wandb.run.summary["hpo/trial_state"] = "COMPLETE"
+            wandb.run.summary["hpo/objective_value"] = validation_metrics.get(self.objective)
+
+    def on_error(self, error):
+        if isinstance(error, optuna.TrialPruned):
+            if wandb.run is not None:
+                wandb.run.summary["hpo/trial_state"] = "PRUNED"
+            return "pruned"
+        return None
+
+
 class HPOTrainingScript:
     def __init__(self, config_path=CONFIG_PATH):
         self.config = load_training_configuration(str(config_path))
+        validate_training_config(self.config)
         self.hpo = self.config["hpo"]
         self._validate()
         output = Path(self.config["tracking"]["output_base_dir"])
@@ -108,7 +138,10 @@ class HPOTrainingScript:
             free_gb = shutil.disk_usage(self.summary_dir).free / (1024 ** 3)
             if free_gb < float(self.hpo.get("min_free_disk_gb", 0)):
                 raise RuntimeError(f"Insufficient disk space before trial: {free_gb:.1f} GiB")
-            experiment = TrainingTranslationScript(config=config, optuna_trial=trial)
+            experiment = TrainingTranslationScript(
+                config=config,
+                extension=OptunaRunExtension(trial, self.hpo["objective"]),
+            )
             result = experiment.run()
             run_dir = Path(result["run_dir"])
             metric_name = self.hpo["objective"]

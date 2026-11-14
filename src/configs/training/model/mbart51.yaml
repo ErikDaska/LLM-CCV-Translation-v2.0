@@ -1,0 +1,3 @@
+model_name: Iscte-Sintra/mbart-51-stable
+src_lang: kea_sv_XX
+tgt_lang: pt_XX
