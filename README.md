@@ -39,16 +39,18 @@ identidade do experimento; os **groups** contêm partes reutilizáveis:
 
 ```
 src/configs/training/
-├── smoke_manual.yaml          # root: teste de integração (config por omissão)
-├── manual_mbart51_sv.yaml     # root: run manual mBART-51 → Hub
-├── manual_nllb_sv.yaml        # root: baseline manual NLLB
-├── model/                     # group → chave "model"
-│   ├── mbart.yaml             #   facebook/mbart-large-50
-│   ├── mbart51.yaml           #   Iscte-Sintra/mbart-51-stable
-│   └── nllb.yaml              #   facebook/nllb-200-distilled-600M
-├── data/                      # group → chave "data"
-│   └── sv.yaml                #   dataset + max_length
-└── training_arguments/        # group → chave "training_arguments"
+├── smoke_manual.yaml                # root: teste de integração (config por omissão)
+├── manual_mbart51_sv.yaml           # root: run manual mBART-51 → Hub
+├── manual_nllb_sv.yaml              # root: baseline manual NLLB (unidirecional)
+├── manual_nllb_bidirectional.yaml   # root: NLLB kea<->pt no kea-sv-pt-v2
+├── model/                           # group → chave "model"
+│   ├── mbart.yaml                   #   facebook/mbart-large-50
+│   ├── mbart51.yaml                 #   Iscte-Sintra/mbart-51-stable
+│   └── nllb.yaml                    #   facebook/nllb-200-distilled-600M
+├── data/                            # group → chave "data"
+│   ├── sv.yaml                      #   dataset SV + colunas origem/alvo
+│   └── kea_sv_pt.yaml               #   kea-sv-pt-v2 + colunas + bidirecional
+└── training_arguments/              # group → chave "training_arguments"
     ├── smoke.yaml
     ├── manual_mbart51.yaml
     └── manual_nllb.yaml
@@ -72,6 +74,18 @@ hub: { ... }
 Os ficheiros de avaliação (`src/configs/evaluation/`) são YAML simples e
 independentes do Hydra.
 
+### Grupo `data`
+
+Para além de `dataset` e `max_length`, o grupo `data` aceita:
+
+| Chave | Padrão | Descrição |
+|---|---|---|
+| `source_column` | `original_sentence` | Coluna do texto de origem |
+| `target_column` | `translation` | Coluna do texto de destino (referência de avaliação) |
+| `bidirectional` | `false` | Treina as duas direções (origem↔destino) no mesmo run |
+| `multi_reference_validation` | `false` | Agrupa fontes repetidas na validação (N referências) |
+| `filters` | `{}` | Igualdades coluna=valor aplicadas a todos os splits (ex.: descartar linhas `en-us`) |
+
 ## Treino manual
 
 Sempre a partir da raiz do projeto (com o `venv` ativo):
@@ -83,10 +97,37 @@ python src/train.py
 # Um experimento concreto
 python src/train.py --config-name manual_nllb_sv
 python src/train.py --config-name manual_mbart51_sv
+python src/train.py --config-name manual_nllb_bidirectional
 
 # Dry-run: imprime a config composta e termina (não treina nem toca em GPU/W&B)
 python src/train.py --cfg job --config-name manual_nllb_sv
 ```
+
+### Treino bidirecional (kea ↔ pt)
+
+`manual_nllb_bidirectional` usa o dataset `Iscte-Sintra/kea-sv-pt-v2`
+(colunas `sentence` = crioulo, `translation_text` = português; uma linha
+`en-us` descartada por `data.filters`):
+
+- **Treino**: cada par é tokenizado nas duas direções
+  (`kea→pt` e `pt→kea`) e concatenados; o token de língua da direção contrária
+  é registado pelo próprio script (`_prepare_languages`, sem alterações).
+- **Seleção de checkpoint**: só na direção `kea→pt` (`eval_chrf`), igual ao
+  baseline unidirecional.
+- **Avaliação final**: além da direção principal, o mesmo melhor checkpoint é
+  avaliado em `pt→kea` (troca de `forced_bos_token_id` e referências) e
+  gravado em `metrics.json` sob `validation_bidirectional` (prefixo W&B
+  `eval_bidirectional_*`).
+
+### Label smoothing
+
+`training_arguments.label_smoothing_factor > 0` é suportado em m2m-100/MBART/
+NLLB: o script anexa `prepare_decoder_input_ids_from_labels` ao modelo
+(`TrainingTranslationScript._enable_label_smoothing_support`), o ponto de
+extensão que o `DataCollatorForSeq2Seq` usa para reconstruir as entradas do
+decoder quando o Trainer remove os `labels` do batch. Sem este hook, o
+forward falharia com `ValueError: You cannot specify both decoder_input_ids
+and decoder_inputs_embeds`.
 
 ### Overrides de hiperparâmetros (sem reescrever ficheiros)
 
@@ -132,7 +173,7 @@ podem ser `auto` para lerem os códigos do `config.json` do run de treino.
 |---|---|
 | Hiperparâmetros fixos partilhados | `src/configs/training/training_arguments/*.yaml` |
 | Modelo / línguas | `src/configs/training/model/*.yaml` |
-| Dataset / `max_length` | `src/configs/training/data/*.yaml` |
+| Dataset / colunas / `max_length` / bidirecional | `src/configs/training/data/*.yaml` |
 | Valores pontuais de um run | Override na linha de comandos (`training_arguments.x=...`) |
 | Experimento novo | Copiar um root e ajustar `defaults` + `tracking`/`hub` |
 | Configuração de avaliação | `src/configs/evaluation/*.yaml` |
@@ -153,6 +194,7 @@ podem ser `auto` para lerem os códigos do `config.json` do run de treino.
 |---|---|
 | Smoke test | `python src/train.py` |
 | Treino manual | `python src/train.py --config-name manual_nllb_sv` |
+| Treino bidirecional kea↔pt | `python src/train.py --config-name manual_nllb_bidirectional` |
 | Override pontual | `python src/train.py --config-name X training_arguments.learning_rate=3e-5` |
 | Sweep | `python src/train.py -m --config-name X a.b=1,2` |
 | Ver config composta | `python src/train.py --cfg job --config-name X` |

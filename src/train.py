@@ -21,7 +21,7 @@ import torch
 import wandb
 from omegaconf import DictConfig, OmegaConf
 from utils.run_tracking import RunTracking
-from datasets import load_dataset
+from datasets import concatenate_datasets, load_dataset
 from transformers import (
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
@@ -104,13 +104,39 @@ class TrainingTranslationScript:
             raise EnvironmentError("HF_TOKEN is not set in environment or .env file.")
 
     def _load_dataset(self):
-        """Load the parallel corpus and cache the language/max length settings."""
+        """Load the parallel corpus and cache columns, filters and language settings."""
         logging.info('Dataset Loading %s', self.config["data"]["dataset"])
         self.dataset = load_dataset(self.config["data"]["dataset"], token=self.token)
 
-        self.max_length = self.config["data"]["max_length"]
+        data = self.config["data"]
+        self.source_column = data.get("source_column", "original_sentence")
+        self.target_column = data.get("target_column", "translation")
+        available = self.dataset["train"].column_names
+        missing = [column for column in (self.source_column, self.target_column)
+                   if column not in available]
+        if missing:
+            raise KeyError(f"Columns {missing} missing from dataset {data['dataset']}; "
+                           f"available: {available}")
+
+        self._apply_dataset_filters(data.get("filters") or {})
+
+        self.max_length = data["max_length"]
         self.src_lang = self.config["model"]["src_lang"]
         self.tgt_lang = self.config["model"]["tgt_lang"]
+        self.bidirectional = bool(data.get("bidirectional", False))
+
+    def _apply_dataset_filters(self, filters):
+        """Keep only rows matching every configured column/value equality filter."""
+        available = self.dataset["train"].column_names
+        for column, expected in filters.items():
+            if column not in available:
+                raise KeyError(f"Filter column {column!r} missing from dataset; "
+                               f"available: {available}")
+            self.dataset = self.dataset.filter(
+                lambda row, col=column, value=expected: row[col] == value
+            )
+            logging.info("Filter %s == %r: %d train rows kept",
+                         column, expected, len(self.dataset["train"]))
 
     def _load_model_and_tokenizer(self):
         model_id = self.config["model"]["model_name"]
@@ -125,7 +151,11 @@ class TrainingTranslationScript:
         tokenizer = AutoTokenizer.from_pretrained(model_id, token=self.token, **tokenizer_kwargs)
 
         model = AutoModelForSeq2SeqLM.from_pretrained(model_id, token=self.token)
-        return self._prepare_languages(model, tokenizer)
+        model, tokenizer = self._prepare_languages(model, tokenizer)
+        self._enable_label_smoothing_support(model)
+        # Language id used as forced BOS for the reverse (pt->kea) direction.
+        self.reverse_target_id = tokenizer.convert_tokens_to_ids(self.src_lang)
+        return model, tokenizer
 
     def _prepare_languages(self, model, tokenizer):
         is_m2m100 = isinstance(tokenizer, M2M100Tokenizer)
@@ -180,24 +210,58 @@ class TrainingTranslationScript:
 
         return model, tokenizer
 
+    def _enable_label_smoothing_support(self, model):
+        """Make label smoothing work with m2m-100/MBART/NLLB decoders.
+
+        With ``label_smoothing_factor > 0`` the Trainer strips ``labels`` from
+        the batch before the forward pass, so the decoder would receive neither
+        ``decoder_input_ids`` nor ``decoder_inputs_embeds`` and raises
+        ``ValueError: You cannot specify both decoder_input_ids and
+        decoder_inputs_embeds``. ``DataCollatorForSeq2Seq`` rebuilds the
+        decoder inputs through this hook when the model exposes it, which is
+        the extension point HF reserves for exactly this case.
+        """
+        smoothing = self.config["training_arguments"].get("label_smoothing_factor") or 0
+        if not smoothing or hasattr(model, "prepare_decoder_input_ids_from_labels"):
+            return
+
+        if model.config.model_type == "mbart":
+            from transformers.models.mbart.modeling_mbart import shift_tokens_right
+        else:
+            from transformers.models.m2m_100.modeling_m2m_100 import shift_tokens_right
+
+        pad_token_id = model.config.pad_token_id
+        decoder_start_token_id = model.config.decoder_start_token_id
+        model.prepare_decoder_input_ids_from_labels = lambda labels: shift_tokens_right(
+            labels, pad_token_id, decoder_start_token_id
+        )
+        logging.info("Label smoothing %.3g: attached decoder-input hook to %s",
+                     smoothing, model.__class__.__name__)
+
     def _load_metrics(self):
         self.sacrebleu = evaluate.load("sacrebleu")
         self.chrf = evaluate.load("chrf")
         self.meteor = evaluate.load("meteor")
         self.ter = evaluate.load("ter")
 
-    def preprocess_function(self, examples):
-        """Tokenize a batch of original_sentence/translation pairs with truncation."""
-        self.tokenizer.src_lang = self.src_lang
-        self.tokenizer.tgt_lang = self.tgt_lang
+    def _tokenize_split(self, split, src_lang, tgt_lang):
+        """Tokenize one split for a single translation direction.
 
-        return self.tokenizer(
-            examples["original_sentence"],
-            text_target=examples["translation"],
-            max_length=self.max_length,
-            truncation=True,
-            padding=False,
-        )
+        Direction A passes the configured ``src_lang -> tgt_lang``; direction B
+        of a bidirectional run passes them swapped over the same columns.
+        """
+        def tokenize(examples):
+            self.tokenizer.src_lang = src_lang
+            self.tokenizer.tgt_lang = tgt_lang
+            return self.tokenizer(
+                examples[self.source_column],
+                text_target=examples[self.target_column],
+                max_length=self.max_length,
+                truncation=True,
+                padding=False,
+            )
+
+        return split.map(tokenize, batched=True, remove_columns=split.column_names)
 
     def compute_metrics(self, eval_preds, *, references):
         """Decode generated token IDs and return BLEU, chrF, METEOR and TER.
@@ -292,18 +356,26 @@ class TrainingTranslationScript:
         callbacks.extend(self.extension.build_callbacks())
         return callbacks
 
-    def _build_validation_view(self, tokenized_validation):
-        """Return the eval split and its references (optionally multi-reference)."""
+    def _build_validation_view(self, tokenized_validation, *, source_column, target_column):
+        """Return the eval split and its references (optionally multi-reference).
+
+        ``source_column``/``target_column`` are swapped for the reverse
+        direction so references always match the tokenized order.
+        """
         validation_dataset = tokenized_validation
         if self.config["data"].get("multi_reference_validation", False):
             from utils.validation_refs import build_multireference_view
 
-            positions, references = build_multireference_view(self.dataset["validation"])
+            positions, references = build_multireference_view(
+                self.dataset["validation"],
+                source_column=source_column,
+                target_column=target_column,
+            )
             validation_dataset = validation_dataset.select(positions)
             logging.info("Validation: %d pairs grouped into %d unique sources",
                          len(self.dataset["validation"]), len(positions))
         else:
-            references = tuple(self.dataset["validation"]["translation"])
+            references = tuple(self.dataset["validation"][target_column])
         return validation_dataset, references
 
     def _build_trainer(self, tokenized_datasets, validation_dataset, references,
@@ -328,10 +400,36 @@ class TrainingTranslationScript:
         validation_metrics = trainer.evaluate()
         return train_result, validation_metrics
 
-    def _record_results(self, trainer, args, train_result, validation_metrics):
+    def _evaluate_reverse_direction(self, trainer, tokenized_validation_reverse):
+        """Evaluate pt->kea with swapped references and forced BOS language id.
+
+        Checkpoint selection stays on direction A (kea->pt); this pass only
+        reports how the same checkpoint performs in the reverse direction.
+        """
+        reverse_dataset, reverse_references = self._build_validation_view(
+            tokenized_validation_reverse,
+            source_column=self.target_column,
+            target_column=self.source_column,
+        )
+        original_compute_metrics = trainer.compute_metrics
+        original_forced_bos = self.model.generation_config.forced_bos_token_id
+        try:
+            trainer.compute_metrics = partial(self.compute_metrics,
+                                              references=reverse_references)
+            self.model.generation_config.forced_bos_token_id = self.reverse_target_id
+            return trainer.evaluate(eval_dataset=reverse_dataset,
+                                    metric_key_prefix="eval_bidirectional")
+        finally:
+            trainer.compute_metrics = original_compute_metrics
+            self.model.generation_config.forced_bos_token_id = original_forced_bos
+
+    def _record_results(self, trainer, args, train_result, validation_metrics,
+                        reverse_metrics=None):
         """Write metrics, history and checkpoint selection to the run directory."""
-        self.tracking.write('metrics.json', {'train': train_result.metrics,
-                                             'validation': validation_metrics})
+        metrics = {'train': train_result.metrics, 'validation': validation_metrics}
+        if reverse_metrics is not None:
+            metrics['validation_bidirectional'] = reverse_metrics
+        self.tracking.write('metrics.json', metrics)
         self.tracking.write('history.json', trainer.state.log_history)
         self.tracking.write('selection.json', {
             'best_checkpoint': trainer.state.best_model_checkpoint,
@@ -372,16 +470,28 @@ class TrainingTranslationScript:
         args = self._build_training_arguments(output_dir, run_name)
         callbacks = self._build_callbacks(args)
         validation_dataset, references = self._build_validation_view(
-            tokenized_datasets["validation"])
+            tokenized_datasets["validation"],
+            source_column=self.source_column,
+            target_column=self.target_column,
+        )
         trainer = self._build_trainer(tokenized_datasets, validation_dataset, references,
                                       data_collator, args, callbacks)
 
         train_result, validation_metrics = self._train_and_evaluate(trainer)
-        self._record_results(trainer, args, train_result, validation_metrics)
+
+        reverse_metrics = None
+        if self.bidirectional:
+            reverse_metrics = self._evaluate_reverse_direction(
+                trainer, tokenized_datasets["validation_reverse"])
+            logging.info("Reverse validation (pt->kea): %s", reverse_metrics)
+
+        self._record_results(trainer, args, train_result, validation_metrics,
+                             reverse_metrics)
         self._export_final_model(trainer)
 
         return {
             "validation_metrics": validation_metrics,
+            "validation_bidirectional_metrics": reverse_metrics,
             "best_checkpoint": trainer.state.best_model_checkpoint,
             "run_dir": str(self.tracking.path),
         }
@@ -431,8 +541,25 @@ class TrainingTranslationScript:
                 wandb.finish(exit_code=exit_code)
 
     def _run_training(self):
-        """Tokenize dataset splits, create the collator and run training."""
-        tokenized_datasets = self.dataset.map(self.preprocess_function, batched=True, remove_columns=self.dataset["train"].column_names)
+        """Tokenize train/validation splits per direction, build the collator, train."""
+        train = self.dataset["train"]
+        validation = self.dataset["validation"]
+        forward = (self.src_lang, self.tgt_lang)
+        reverse = (self.tgt_lang, self.src_lang)
+
+        tokenized_datasets = {
+            "train": self._tokenize_split(train, *forward),
+            "validation": self._tokenize_split(validation, *forward),
+        }
+        if self.bidirectional:
+            # Both directions in one training set; halves stay contiguous.
+            tokenized_datasets["train"] = concatenate_datasets([
+                tokenized_datasets["train"],
+                self._tokenize_split(train, *reverse),
+            ])
+            tokenized_datasets["validation_reverse"] = self._tokenize_split(
+                validation, *reverse)
+
         data_collator = DataCollatorForSeq2Seq(self.tokenizer, model=self.model, pad_to_multiple_of=8)
         return self.manual_training(tokenized_datasets, data_collator)
 
