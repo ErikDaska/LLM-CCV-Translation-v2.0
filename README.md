@@ -129,6 +129,24 @@ decoder quando o Trainer remove os `labels` do batch. Sem este hook, o
 forward falharia com `ValueError: You cannot specify both decoder_input_ids
 and decoder_inputs_embeds`.
 
+### Escala do loss com gradient accumulation
+
+O `Trainer` do transformers 5.14.1 assume que o modelo recebe
+`num_items_in_batch` e reescala o loss para a janela de acumulação; os modelos
+deste repositório (m2m-100/NLLB/MBart) calculam uma média simples e ignoram esse
+argumento, pelo que o Trainer saltava a sua divisão por
+`gradient_accumulation_steps` — **o `train/loss` registado e os gradientes
+ficavam multiplicados pelo número de passos de acumulação**. O script corrige
+isto em `_build_trainer` (`trainer.model_accepts_loss_kwargs = False`, o remédio
+documentado no docstring de `Trainer.compute_loss`); com o fix, `train/loss` e
+`eval/loss` estão na mesma escala.
+
+Runs anteriores a este fix têm o `train/loss`/`train_loss` inflacionado pelo seu
+`gradient_accumulation_steps` (×8 nos runs NLLB, ×2 no baseline de 17-Set,
+×1 nos HPO com acumulação 1) — para comparar, divida pelo respetivo valor. O
+`eval/loss` nunca foi afetado (o loop de avaliação não acumula); com label
+smoothing inclui ainda o chão ≈ `ε·ln(vocab)` (≈1.25 para NLLB com ε=0.1).
+
 ### Overrides de hiperparâmetros (sem reescrever ficheiros)
 
 Qualquer chave aceita `chave=valor` na linha de comandos, com sintaxe de ponto:

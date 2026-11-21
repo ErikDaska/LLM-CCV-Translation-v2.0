@@ -380,9 +380,16 @@ class TrainingTranslationScript:
 
     def _build_trainer(self, tokenized_datasets, validation_dataset, references,
                        data_collator, args, callbacks):
-        """Create the Seq2SeqTrainer bound to the validation metrics."""
+        """Create the Seq2SeqTrainer bound to the validation metrics.
+
+        Forces ``model_accepts_loss_kwargs=False``: M2M100/NLLB/MBart compute a
+        plain mean loss that ignores ``num_items_in_batch``, so the Trainer must
+        apply its own gradient-accumulation division. Otherwise both the logged
+        loss and the gradients are scaled by ``gradient_accumulation_steps``
+        (caveat documented in ``Trainer.compute_loss``).
+        """
         validation_compute_metrics = partial(self.compute_metrics, references=references)
-        return Seq2SeqTrainer(
+        trainer = Seq2SeqTrainer(
             model=self.model,
             args=args,
             train_dataset=tokenized_datasets["train"],
@@ -392,6 +399,8 @@ class TrainingTranslationScript:
             compute_metrics=validation_compute_metrics,
             callbacks=callbacks,
         )
+        trainer.model_accepts_loss_kwargs = False
+        return trainer
 
     def _train_and_evaluate(self, trainer):
         """Run the training loop, then evaluate the restored best checkpoint."""
