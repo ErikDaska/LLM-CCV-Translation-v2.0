@@ -1,11 +1,18 @@
 # Manual NLLB baseline bidirectional kea<->pt on the kea-sv-pt-v2 corpus.
-# Checkpoint selection uses kea->pt (eval_chrf); pt->kea is reported after
-# training under metrics.json:validation_bidirectional.
+# Every evaluation scores both directions; checkpoint selection and early
+# stopping use eval_chrf_mean (mean chrF of kea->pt and pt->kea).
 defaults:
   - model: nllb
   - data: kea_sv_pt
   - training_arguments: manual_nllb
   - _self_
+
+model:
+  # The dedicated kea_sv_XX token keeps its own id; kea_Latn only seeds its
+  # initial embedding.
+  init_src_lang_from: kea_Latn
+training_arguments:
+  metric_for_best_model: eval_chrf_mean
 
 early_stopping_patience: 3
 hub:

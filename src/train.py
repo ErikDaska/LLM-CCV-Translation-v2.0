@@ -60,6 +60,51 @@ class TrainingRunExtension:
         return None
 
 
+class BidirectionalSeq2SeqTrainer(Seq2SeqTrainer):
+    """Seq2SeqTrainer whose default evaluation also scores the reverse direction.
+
+    The reverse pass runs inside ``evaluation_loop`` so its metrics, and the
+    ``eval_chrf_mean`` of both directions, reach logging, early stopping and
+    checkpoint selection in the same dict as the forward metrics.
+    """
+
+    def __init__(self, *args, reverse_dataset, reverse_compute_metrics,
+                 reverse_forced_bos_token_id, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.reverse_dataset = reverse_dataset
+        self.reverse_compute_metrics = reverse_compute_metrics
+        self.reverse_forced_bos_token_id = reverse_forced_bos_token_id
+
+    def evaluation_loop(self, dataloader, description, prediction_loss_only=None,
+                        ignore_keys=None, metric_key_prefix="eval"):
+        output = super().evaluation_loop(dataloader, description, prediction_loss_only,
+                                         ignore_keys, metric_key_prefix)
+        if metric_key_prefix != "eval":
+            return output
+
+        generation_config = self.model.generation_config
+        forward_compute_metrics = self.compute_metrics
+        forward_forced_bos = generation_config.forced_bos_token_id
+        try:
+            self.compute_metrics = self.reverse_compute_metrics
+            generation_config.forced_bos_token_id = self.reverse_forced_bos_token_id
+            reverse = super().evaluation_loop(
+                self.get_eval_dataloader(self.reverse_dataset),
+                f"{description} (reverse)",
+                prediction_loss_only,
+                ignore_keys,
+                metric_key_prefix="eval_bidirectional",
+            )
+        finally:
+            self.compute_metrics = forward_compute_metrics
+            generation_config.forced_bos_token_id = forward_forced_bos
+
+        output.metrics.update(reverse.metrics)
+        output.metrics["eval_chrf_mean"] = (
+            output.metrics["eval_chrf"] + reverse.metrics["eval_bidirectional_chrf"]) / 2
+        return output
+
+
 class TrainingTranslationScript:
     """Prepare translation resources and run manual training."""
 
@@ -166,6 +211,7 @@ class TrainingTranslationScript:
         else:
             source_token = self.src_lang
 
+        source_is_new = tokenizer.convert_tokens_to_ids(source_token) in (None, tokenizer.unk_token_id)
         tokenizer.add_special_tokens(
             {"additional_special_tokens": [source_token]},
             replace_extra_special_tokens=False,
@@ -200,6 +246,9 @@ class TrainingTranslationScript:
         if required_size > current_size:
             model.resize_token_embeddings(required_size)
 
+        if source_is_new:
+            self._initialize_language_embedding(model, tokenizer, source_id, source_token)
+
         tokenizer.src_lang = self.src_lang
         tokenizer.tgt_lang = self.tgt_lang
 
@@ -209,6 +258,30 @@ class TrainingTranslationScript:
             model.config.use_cache = False
 
         return model, tokenizer
+
+    def _initialize_language_embedding(self, model, tokenizer, token_id, token):
+        """Copy an existing language token's vectors into a newly added one.
+
+        The dedicated token keeps its own id; only its starting value comes from
+        ``model.init_src_lang_from`` (e.g. ``kea_Latn``). Without this, NLLB's
+        spare embedding rows are reused as-is (no resize happens), and an
+        untrained row would be the decoder BOS for the reverse direction.
+        """
+        init_token = self.config["model"].get("init_src_lang_from")
+        if not init_token:
+            return
+        init_id = tokenizer.convert_tokens_to_ids(init_token)
+        if init_id is None or init_id == tokenizer.unk_token_id:
+            raise ValueError(f"init_src_lang_from token unknown to tokenizer: {init_token}")
+
+        input_embeddings = model.get_input_embeddings().weight
+        output_embeddings = model.get_output_embeddings().weight
+        with torch.no_grad():
+            input_embeddings[token_id] = input_embeddings[init_id]
+            if output_embeddings.data_ptr() != input_embeddings.data_ptr():
+                output_embeddings[token_id] = output_embeddings[init_id]
+        logging.info("Initialized %s (id %d) from %s (id %d)",
+                     token, token_id, init_token, init_id)
 
     def _enable_label_smoothing_support(self, model):
         """Make label smoothing work with m2m-100/MBART/NLLB decoders.
@@ -244,24 +317,31 @@ class TrainingTranslationScript:
         self.meteor = evaluate.load("meteor")
         self.ter = evaluate.load("ter")
 
-    def _tokenize_split(self, split, src_lang, tgt_lang):
+    def _tokenize_split(self, split, src_lang, tgt_lang, source_column, target_column):
         """Tokenize one split for a single translation direction.
 
-        Direction A passes the configured ``src_lang -> tgt_lang``; direction B
-        of a bidirectional run passes them swapped over the same columns.
+        Direction A passes ``src_lang -> tgt_lang`` over ``source_column ->
+        target_column``; direction B of a bidirectional run swaps both the
+        language codes and the columns, so each tag matches its text.
         """
         def tokenize(examples):
             self.tokenizer.src_lang = src_lang
             self.tokenizer.tgt_lang = tgt_lang
             return self.tokenizer(
-                examples[self.source_column],
-                text_target=examples[self.target_column],
+                examples[source_column],
+                text_target=examples[target_column],
                 max_length=self.max_length,
                 truncation=True,
                 padding=False,
             )
 
-        return split.map(tokenize, batched=True, remove_columns=split.column_names)
+        tokenized = split.map(tokenize, batched=True, remove_columns=split.column_names)
+        if len(tokenized):
+            first = tokenized[0]
+            logging.info("Sample %s->%s | input: %s | labels: %s", src_lang, tgt_lang,
+                         self.tokenizer.decode(first["input_ids"]),
+                         self.tokenizer.decode(first["labels"]))
+        return tokenized
 
     def compute_metrics(self, eval_preds, *, references):
         """Decode generated token IDs and return BLEU, chrF, METEOR and TER.
@@ -380,7 +460,11 @@ class TrainingTranslationScript:
 
     def _build_trainer(self, tokenized_datasets, validation_dataset, references,
                        data_collator, args, callbacks):
-        """Create the Seq2SeqTrainer bound to the validation metrics.
+        """Create the trainer bound to the validation metrics.
+
+        Bidirectional runs use ``BidirectionalSeq2SeqTrainer``: every evaluation
+        also scores pt->kea (swapped references, reverse forced BOS) and adds
+        ``eval_bidirectional_*`` plus ``eval_chrf_mean``.
 
         Forces ``model_accepts_loss_kwargs=False``: M2M100/NLLB/MBart compute a
         plain mean loss that ignores ``num_items_in_batch``, so the Trainer must
@@ -389,7 +473,21 @@ class TrainingTranslationScript:
         (caveat documented in ``Trainer.compute_loss``).
         """
         validation_compute_metrics = partial(self.compute_metrics, references=references)
-        trainer = Seq2SeqTrainer(
+        trainer_class, extra_kwargs = Seq2SeqTrainer, {}
+        if self.bidirectional:
+            reverse_dataset, reverse_references = self._build_validation_view(
+                tokenized_datasets["validation_reverse"],
+                source_column=self.target_column,
+                target_column=self.source_column,
+            )
+            trainer_class = BidirectionalSeq2SeqTrainer
+            extra_kwargs = {
+                "reverse_dataset": reverse_dataset,
+                "reverse_compute_metrics": partial(self.compute_metrics,
+                                                   references=reverse_references),
+                "reverse_forced_bos_token_id": self.reverse_target_id,
+            }
+        trainer = trainer_class(
             model=self.model,
             args=args,
             train_dataset=tokenized_datasets["train"],
@@ -398,6 +496,7 @@ class TrainingTranslationScript:
             processing_class=self.tokenizer,
             compute_metrics=validation_compute_metrics,
             callbacks=callbacks,
+            **extra_kwargs,
         )
         trainer.model_accepts_loss_kwargs = False
         return trainer
@@ -408,29 +507,6 @@ class TrainingTranslationScript:
         # The Trainer restored the best checkpoint; evaluate that model explicitly.
         validation_metrics = trainer.evaluate()
         return train_result, validation_metrics
-
-    def _evaluate_reverse_direction(self, trainer, tokenized_validation_reverse):
-        """Evaluate pt->kea with swapped references and forced BOS language id.
-
-        Checkpoint selection stays on direction A (kea->pt); this pass only
-        reports how the same checkpoint performs in the reverse direction.
-        """
-        reverse_dataset, reverse_references = self._build_validation_view(
-            tokenized_validation_reverse,
-            source_column=self.target_column,
-            target_column=self.source_column,
-        )
-        original_compute_metrics = trainer.compute_metrics
-        original_forced_bos = self.model.generation_config.forced_bos_token_id
-        try:
-            trainer.compute_metrics = partial(self.compute_metrics,
-                                              references=reverse_references)
-            self.model.generation_config.forced_bos_token_id = self.reverse_target_id
-            return trainer.evaluate(eval_dataset=reverse_dataset,
-                                    metric_key_prefix="eval_bidirectional")
-        finally:
-            trainer.compute_metrics = original_compute_metrics
-            self.model.generation_config.forced_bos_token_id = original_forced_bos
 
     def _record_results(self, trainer, args, train_result, validation_metrics,
                         reverse_metrics=None):
@@ -490,9 +566,11 @@ class TrainingTranslationScript:
 
         reverse_metrics = None
         if self.bidirectional:
-            reverse_metrics = self._evaluate_reverse_direction(
-                trainer, tokenized_datasets["validation_reverse"])
-            logging.info("Reverse validation (pt->kea): %s", reverse_metrics)
+            # Already computed by BidirectionalSeq2SeqTrainer on the best checkpoint.
+            reverse_metrics = {key: value for key, value in validation_metrics.items()
+                               if key.startswith("eval_bidirectional_")}
+            logging.info("Reverse validation (%s->%s): %s",
+                         self.tgt_lang, self.src_lang, reverse_metrics)
 
         self._record_results(trainer, args, train_result, validation_metrics,
                              reverse_metrics)
@@ -553,21 +631,24 @@ class TrainingTranslationScript:
         """Tokenize train/validation splits per direction, build the collator, train."""
         train = self.dataset["train"]
         validation = self.dataset["validation"]
-        forward = (self.src_lang, self.tgt_lang)
-        reverse = (self.tgt_lang, self.src_lang)
+        forward = (self.src_lang, self.tgt_lang, self.source_column, self.target_column)
+        reverse = (self.tgt_lang, self.src_lang, self.target_column, self.source_column)
 
         tokenized_datasets = {
             "train": self._tokenize_split(train, *forward),
             "validation": self._tokenize_split(validation, *forward),
         }
         if self.bidirectional:
-            # Both directions in one training set; halves stay contiguous.
+            # Both directions in one training set; the Trainer's sampler shuffles them.
             tokenized_datasets["train"] = concatenate_datasets([
                 tokenized_datasets["train"],
                 self._tokenize_split(train, *reverse),
             ])
             tokenized_datasets["validation_reverse"] = self._tokenize_split(
                 validation, *reverse)
+        # Leave the saved tokenizer defaulting to the configured direction.
+        self.tokenizer.src_lang = self.src_lang
+        self.tokenizer.tgt_lang = self.tgt_lang
 
         data_collator = DataCollatorForSeq2Seq(self.tokenizer, model=self.model, pad_to_multiple_of=8)
         return self.manual_training(tokenized_datasets, data_collator)

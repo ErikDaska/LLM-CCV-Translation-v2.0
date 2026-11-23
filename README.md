@@ -109,15 +109,23 @@ python src/train.py --cfg job --config-name manual_nllb_sv
 (colunas `sentence` = crioulo, `translation_text` = português; uma linha
 `en-us` descartada por `data.filters`):
 
-- **Treino**: cada par é tokenizado nas duas direções
-  (`kea→pt` e `pt→kea`) e concatenados; o token de língua da direção contrária
-  é registado pelo próprio script (`_prepare_languages`, sem alterações).
-- **Seleção de checkpoint**: só na direção `kea→pt` (`eval_chrf`), igual ao
-  baseline unidirecional.
-- **Avaliação final**: além da direção principal, o mesmo melhor checkpoint é
-  avaliado em `pt→kea` (troca de `forced_bos_token_id` e referências) e
-  gravado em `metrics.json` sob `validation_bidirectional` (prefixo W&B
-  `eval_bidirectional_*`).
+- **Treino**: cada par é tokenizado nas duas direções e as duas metades são
+  concatenadas. Em `kea→pt` a entrada é `[kea_sv_XX] <crioulo>` e as labels são
+  `[por_Latn] <português>`. Em `pt→kea` trocam-se **as etiquetas e as colunas**:
+  a entrada é `[por_Latn] <português>` e as labels são `[kea_sv_XX] <crioulo>`.
+  O log mostra um exemplo descodificado de cada direção (`Sample ... | input | labels`).
+- **Token da variedade**: `kea_sv_XX` é um token dedicado, com id próprio, para
+  identificar a variedade de São Vicente. `model.init_src_lang_from: kea_Latn` só
+  copia o vetor de `kea_Latn` para o valor inicial de `kea_sv_XX`. A partir daí os
+  dois vetores são independentes. No NLLB isto é preciso porque o token novo
+  reutiliza uma linha de embedding de reserva e não há resize.
+- **Avaliação e seleção de checkpoint**: cada avaliação corre as duas direções
+  (`BidirectionalSeq2SeqTrainer`). Na direção inversa troca-se o
+  `forced_bos_token_id` e as referências. As métricas `eval_*` (kea→pt),
+  `eval_bidirectional_*` (pt→kea) e `eval_chrf_mean` (média do chrF) aparecem no
+  W&B. O early stopping e o melhor checkpoint usam `eval_chrf_mean`. As métricas
+  pt→kea do checkpoint final ficam também em `metrics.json` sob
+  `validation_bidirectional`.
 
 ### Label smoothing
 
