@@ -127,6 +127,12 @@ python src/train.py --cfg job --config-name manual_nllb_sv
   pt→kea do checkpoint final ficam também em `metrics.json` sob
   `validation_bidirectional`.
 
+### Variedade de Santiago (`kea_st_XX`)
+
+`manual_nllb_bidirectional_st` continua o treino do modelo SV publicado com o
+corpus de Santiago. Passo a passo para treinar no datacenter via SSH, avaliar
+e decidir se publica: [docs/runbook-santiago.md](docs/runbook-santiago.md).
+
 ### Label smoothing
 
 `training_arguments.label_smoothing_factor > 0` é suportado em m2m-100/MBART/
