@@ -87,6 +87,13 @@ def load_evaluation_configuration(path: Path) -> dict[str, Any]:
         if type(value) is not int or value < 1:
             raise ValueError(f"generation.{key} must be a positive integer")
 
+    filters = config["data"].get("filters")
+    if filters is not None and not (
+        isinstance(filters, dict)
+        and all(isinstance(k, str) and isinstance(v, str) for k, v in filters.items())
+    ):
+        raise ValueError("data.filters must be null or a mapping of column -> string value")
+
     if config["data"]["source_column"] == config["data"]["target_column"]:
         raise ValueError("Source and target columns must differ")
     if config["data"]["split"] != "test":
@@ -183,6 +190,19 @@ def normalized_key(text: str) -> str:
     return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text).casefold()).strip()
 
 
+RAW_ROW_INDEX = "__raw_row_index"
+
+
+def apply_row_filters(dataset, filters: dict[str, str] | None):
+    """Keep only rows matching every column/value equality filter, as train.py does."""
+    for column, expected in (filters or {}).items():
+        if column not in dataset.column_names:
+            raise KeyError(f"Filter column {column!r} missing from dataset; "
+                           f"available: {dataset.column_names}")
+        dataset = dataset.filter(lambda row, col=column, value=expected: row[col] == value)
+    return dataset
+
+
 def group_test_references(
     dataset, source_column: str, target_column: str
 ) -> tuple[list[dict[str, Any]], int]:
@@ -191,6 +211,7 @@ def group_test_references(
     invalid_rows = 0
 
     for position, row in enumerate(dataset):
+        position = row.get(RAW_ROW_INDEX, position)
         source, reference = row.get(source_column), row.get(target_column)
         if not isinstance(source, str) or not isinstance(reference, str):
             invalid_rows += 1
@@ -465,6 +486,13 @@ def evaluate_from_config(config_path: Path = CONFIG_PATH) -> dict[str, Any]:
         for column in (src_col, tgt_col):
             if column not in test.column_names:
                 raise ValueError(f"Column {column!r} not found in dataset: {test.column_names}")
+        raw_rows = len(test)
+        filters = config["data"].get("filters")
+        if filters:
+            # Keep raw row positions so dataset_row_indices still point into the split.
+            test = test.add_column(RAW_ROW_INDEX, list(range(raw_rows)))
+            test = apply_row_filters(test, filters)
+            LOG.info("Filters %s: kept %d of %d test rows", filters, len(test), raw_rows)
 
         items, invalid = group_test_references(test, src_col, tgt_col)
         if not items:
@@ -490,7 +518,9 @@ def evaluate_from_config(config_path: Path = CONFIG_PATH) -> dict[str, Any]:
             "dataset_revision": dataset_sha,
             "direction": f"{src_lang}->{tgt_lang}",
             "split": "test",
-            "original_test_rows": len(test),
+            "original_test_rows": raw_rows,
+            "data_filters": filters,
+            "filtered_test_rows": len(test),
             "invalid_test_rows_excluded": invalid,
             "unique_sources_evaluated": len(items),
             "multi_reference_sources": sum(len(item["references"]) > 1 for item in items),

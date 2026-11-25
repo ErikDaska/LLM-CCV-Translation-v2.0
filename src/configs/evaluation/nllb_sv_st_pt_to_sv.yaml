@@ -1,0 +1,33 @@
+# Child model (docs/adr/0001): set model_id to the best checkpoint of
+# manual_nllb_bidirectional_st. Explicit codes: 'auto' would read kea_st_XX
+# from the training record even for São Vicente.
+model:
+  source: local
+  model_id: /home/criolo/storage/models_outputs/translation_models/nllb600m-kea-sv-st-pt-bidir/REPLACE_WITH_RUN/checkpoints/REPLACE_WITH_BEST
+  revision: null
+  src_lang: por_Latn
+  tgt_lang: kea_sv_XX
+
+data:
+  dataset_id: Iscte-Sintra/kea-sv-pt-v2
+  revision: null
+  split: test
+  source_column: translation_text
+  target_column: sentence
+  filters:
+    translation_iso_code: pt-pt
+
+# Same evaluation settings as baseline_nllb.yaml.
+generation:
+  batch_size: 16
+  max_input_length: 128
+  max_new_tokens: 128
+  num_beams: 4
+
+tracking:
+  project: Translation Models
+  entity: null
+  group: kea_sv_st_regression
+  run_name: nllb_sv_st_pt_to_sv-test
+  preview_rows: 100
+  log_predictions_artifact: true

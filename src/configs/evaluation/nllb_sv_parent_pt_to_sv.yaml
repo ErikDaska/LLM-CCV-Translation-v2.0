@@ -1,0 +1,31 @@
+# Parent model baseline for the São Vicente regression check (docs/adr/0001).
+model:
+  source: hub
+  model_id: Iscte-Sintra/nllb600M-kea-pt-bidirectional
+  revision: null
+  src_lang: por_Latn
+  tgt_lang: kea_sv_XX
+
+data:
+  dataset_id: Iscte-Sintra/kea-sv-pt-v2
+  revision: null
+  split: test
+  source_column: translation_text
+  target_column: sentence
+  filters:
+    translation_iso_code: pt-pt
+
+# Same evaluation settings as baseline_nllb.yaml.
+generation:
+  batch_size: 16
+  max_input_length: 128
+  max_new_tokens: 128
+  num_beams: 4
+
+tracking:
+  project: Translation Models
+  entity: null
+  group: kea_sv_st_regression
+  run_name: nllb_sv_parent_pt_to_sv-test
+  preview_rows: 100
+  log_predictions_artifact: true

@@ -1,0 +1,29 @@
+# Add the Santiago Variety to the published São Vicente model by continued
+# fine-tuning on the Santiago Corpus alone (docs/adr/0001). Bidirectional:
+# checkpoint selection and early stopping use eval_chrf_mean.
+defaults:
+  - model: nllb
+  - data: kea_st_pt
+  - training_arguments: manual_nllb
+  - _self_
+
+model:
+  # Parent model; kea_sv_XX already exists in its tokenizer.
+  model_name: Iscte-Sintra/nllb600M-kea-pt-bidirectional
+  src_lang: kea_st_XX
+  # kea_st_XX is new: its embedding starts as a copy of kea_sv_XX.
+  init_src_lang_from: kea_sv_XX
+training_arguments:
+  metric_for_best_model: eval_chrf_mean
+
+early_stopping_patience: 3
+hub:
+  # Never overwrite the parent. Push only after the SV regression check passes.
+  push_to_hub: false
+  hub_repo_id: Iscte-Sintra/nllb600M-kea-sv-st-pt-bidirectional
+  hub_private: true
+tracking:
+  project: Translation Models
+  group_name: nllb600M_KEAPT_bidirectional_st
+  run_name: nllb600M_kea_sv_st_pt_bidirectional_seed42
+  output_base_dir: /home/criolo/storage/models_outputs/translation_models/nllb600m-kea-sv-st-pt-bidir

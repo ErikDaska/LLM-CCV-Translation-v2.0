@@ -1,0 +1,9 @@
+dataset: Iscte-Sintra/Korpora_paralela_st_clean
+max_length: 128
+source_column: original_sentence
+target_column: translation
+# Train both directions in one run: kea_st->pt and pt->kea_st.
+bidirectional: true
+# 6 train rows (and 1 test row) are junk en-us pairs; validation is all pt-pt.
+filters:
+  target_iso_code: pt-pt
